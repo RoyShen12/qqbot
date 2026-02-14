@@ -9,7 +9,7 @@ import { getQQBotRuntime } from "./runtime.js";
 import { startImageServer, isImageServerRunning, downloadFile, type ImageServerConfig } from "./image-server.js";
 import { getImageSize, formatQQBotMarkdownImage, hasQQBotImageSize, DEFAULT_IMAGE_SIZE } from "./utils/image-size.js";
 import { parseQQBotPayload, encodePayloadForCron, isCronReminderPayload, isMediaPayload, type CronReminderPayload, type MediaPayload } from "./utils/payload.js";
-import { convertSilkToWav, isVoiceAttachment, formatDuration } from "./utils/audio-convert.js";
+import { isVoiceAttachment } from "./utils/audio-convert.js";
 
 // QQ Bot intents - 按权限级别分组
 const INTENTS = {
@@ -552,6 +552,8 @@ openclaw cron add \\
         // 处理附件（图片等）- 下载到本地供 clawdbot 访问
         let attachmentInfo = "";
         const imageUrls: string[] = [];
+        const audioUrls: string[] = [];
+        const audioMediaTypes: string[] = [];
         // 存到 clawdbot 工作目录下的 downloads 文件夹
         const downloadDir = path.join(process.env.HOME || "/home/ubuntu", "clawd", "downloads");
         
@@ -581,41 +583,17 @@ openclaw cron add \\
 
 请根据图片内容进行回复。`);
               } else if (isVoiceAttachment(att)) {
-                // ============ 语音消息处理：SILK → WAV ============
-                log?.info(`[qqbot:${account.accountId}] Voice attachment detected: ${att.filename}, converting SILK to WAV...`);
-                try {
-                  const result = await convertSilkToWav(localPath, downloadDir);
-                  if (result) {
-                    const durationStr = formatDuration(result.duration);
-                    log?.info(`[qqbot:${account.accountId}] Voice converted: ${result.wavPath} (duration: ${durationStr})`);
-                    
-                    const timestamp = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
-                    voiceDescriptions.push(`
+                // ============ 语音消息处理：保留原始文件，由 OpenClaw media pipeline 处理 ============
+                log?.info(`[qqbot:${account.accountId}] Voice attachment detected: ${att.filename}, path: ${localPath}`);
+                audioUrls.push(localPath);
+                const audioType = att.content_type === "voice" ? "audio/silk" : (att.content_type || "audio/silk");
+                audioMediaTypes.push(audioType);
+
+                const timestamp = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+                voiceDescriptions.push(`
 用户发送了一条语音消息：
-- 语音文件：${result.wavPath}
-- 语音时长：${durationStr}
-- 发送时间：${timestamp}`);
-                  } else {
-                    // SILK 解码失败，保留原始文件
-                    log?.info(`[qqbot:${account.accountId}] Voice file is not SILK format, keeping original: ${localPath}`);
-                    voiceDescriptions.push(`
-用户发送了一条语音消息（非SILK格式，无法转换）：
 - 语音文件：${localPath}
-- 原始格式：${att.filename || "unknown"}
-- 消息ID：${event.messageId}
-
-请告知用户该语音格式暂不支持解析。`);
-                  }
-                } catch (convertErr) {
-                  log?.error(`[qqbot:${account.accountId}] Voice conversion failed: ${convertErr}`);
-                  voiceDescriptions.push(`
-用户发送了一条语音消息（转换失败）：
-- 原始文件：${localPath}
-- 错误信息：${convertErr}
-- 消息ID：${event.messageId}
-
-请告知用户语音处理出现问题。`);
-                }
+- 发送时间：${timestamp}`);
               } else {
                 otherAttachments.push(`[附件: ${localPath}]`);
               }
@@ -721,18 +699,36 @@ openclaw cron add \\
           QQGuildId: event.guildId,
           QQGroupOpenid: event.groupOpenid,
           CommandAuthorized: commandAuthorized,
-          // 图片多模态支持
-          ...(imageUrls.length > 0 ? {
-            // MediaPath/MediaPaths 仅包含本地文件路径
-            ...(imageUrls.some(p => !p.startsWith("http://") && !p.startsWith("https://")) ? {
-              MediaPath: imageUrls.find(p => !p.startsWith("http://") && !p.startsWith("https://")),
-              MediaPaths: imageUrls.filter(p => !p.startsWith("http://") && !p.startsWith("https://")),
-            } : {}),
-            MediaType: imageMediaTypes[0],
-            MediaUrl: imageUrls[0],
-            MediaUrls: imageUrls,
-            MediaTypes: imageMediaTypes,
-          } : {}),
+          // 多模态支持：合并图片和音频的 MediaPath/MediaPaths
+          ...(() => {
+            const allMediaPaths = [
+              ...imageUrls.filter(p => !p.startsWith("http://") && !p.startsWith("https://")),
+              ...audioUrls,
+            ];
+            const allMediaTypes = [
+              ...imageMediaTypes,
+              ...audioMediaTypes,
+            ];
+            const allMediaUrls = [
+              ...imageUrls,
+              ...audioUrls,
+            ];
+            if (allMediaPaths.length === 0 && allMediaUrls.length === 0) return {};
+            return {
+              ...(allMediaPaths.length > 0 ? {
+                MediaPath: allMediaPaths[0],
+                MediaPaths: allMediaPaths,
+              } : {}),
+              ...(allMediaTypes.length > 0 ? {
+                MediaType: allMediaTypes[0],
+                MediaTypes: allMediaTypes,
+              } : {}),
+              ...(allMediaUrls.length > 0 ? {
+                MediaUrl: allMediaUrls[0],
+                MediaUrls: allMediaUrls,
+              } : {}),
+            };
+          })(),
         });
 
         // 发送消息的辅助函数，带 token 过期重试
