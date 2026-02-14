@@ -10,97 +10,114 @@ metadata: {"clawdbot":{"emoji":"⏰"}}
 
 ---
 
+## ⛔ 最重要的一条规则（读三遍）
+
+> **调用 cron 工具时，payload.kind 必须是 `"agentTurn"`。绝对不能用 `"systemEvent"`！**
+>
+> `systemEvent` 只会在 AI 会话里插入一条文本，用户根本收不到 QQ 消息。
+> 只有 `agentTurn` + `deliver: true` + `channel: "qqbot"` + `to` 才能真正把消息发到 QQ。
+
+---
+
 ## 🤖 AI 决策指南
 
-> **本节专为 AI 理解设计，帮助快速决策**
+### 时间确认规则
+
+> 设置提醒前，先确认当前系统时间（查看上下文中的时间信息，或执行 `date`）。
+> 纯相对时间（"5分钟后"、"1小时后"）可以跳过确认，直接算 `Date.now() + 延迟毫秒`。
 
 ### 用户意图识别
 
-| 用户说法 | 意图 | 执行动作 |
-|----------|------|----------|
-| "5分钟后提醒我喝水" | 创建提醒 | `openclaw cron add` |
-| "每天8点提醒我打卡" | 创建周期提醒 | `openclaw cron add --cron` |
-| "我有哪些提醒" | 查询提醒 | `openclaw cron list` |
-| "取消喝水提醒" | 删除提醒 | `openclaw cron remove` |
-| "修改提醒时间" | 删除+重建 | 先 remove 再 add |
+| 用户说法 | 意图 | cron 工具 action |
+|----------|------|------------------|
+| "5分钟后提醒我喝水" | 创建一次性提醒 | `add`（schedule.kind=at） |
+| "每天8点提醒我打卡" | 创建周期提醒 | `add`（schedule.kind=cron） |
+| "我有哪些提醒" | 查询 | `list` |
+| "取消喝水提醒" | 删除 | `remove` |
+| "修改提醒时间" | 删除+重建 | `remove` → `add` |
 | "提醒我" (无时间) | **需追问** | 询问具体时间 |
 
 ### 必须追问的情况
 
-当用户说法**缺少以下信息**时，**必须追问**：
-
-1. **没有时间**："提醒我喝水" → 询问"请问什么时候提醒你？"
-2. **时间模糊**："晚点提醒我" → 询问"具体几点呢？"
-3. **周期不明**："定期提醒我" → 询问"多久一次？每天？每周？"
-
-### 无需追问可直接执行
-
-| 用户说法 | 理解为 |
-|----------|--------|
-| "5分钟后" | `--at 5m` |
-| "半小时后" | `--at 30m` |
-| "1小时后" | `--at 1h` |
-| "明天早上8点" | `--at 2026-02-02T08:00:00+08:00` |
-| "每天早上8点" | `--cron "0 8 * * *"` |
-| "工作日9点" | `--cron "0 9 * * 1-5"` |
+1. **没有时间**："提醒我喝水" → "请问什么时候提醒你？"
+2. **时间模糊**："晚点提醒我" → "具体几点呢？"
+3. **周期不明**："定期提醒我" → "多久一次？每天？每周？"
 
 ---
 
-## 📋 命令速查
+## 📋 创建提醒（最重要）
 
-### 创建提醒（完整模板）
+### 🚨🚨🚨 工具调用参数模板（AI 必须严格遵循）
 
-```bash
-openclaw cron add \
-  --name "{任务名}" \
-  --at "{时间}" \
-  --message "🔔 {提醒内容}时间到！" \
-  --deliver \
-  --channel qqbot \
-  --to "{openid}" \
-  --delete-after-run
+> **AI 调用 cron 工具时，传的是 JSON 参数，不是 CLI 命令。以下是唯一正确的 JSON 格式：**
+
+**一次性提醒（N 分钟后）**：
+```json
+{
+  "action": "add",
+  "job": {
+    "name": "{任务名}",
+    "schedule": {
+      "kind": "at",
+      "atMs": {当前时间戳毫秒 + N分钟*60000}
+    },
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "deleteAfterRun": true,
+    "payload": {
+      "kind": "agentTurn",
+      "message": "[直接输出] 🔔 {提醒内容}时间到！",
+      "deliver": true,
+      "channel": "qqbot",
+      "to": "{openid}"
+    }
+  }
+}
 ```
 
-> ⚠️ **极其重要**：
-> - `--message` 参数直接写最终要发送的提醒内容
-> - 提醒内容格式：`🔔 {内容}时间到！`
-> - **不要**使用 `--system-prompt` 或 `--system-event`（cron 不支持这些参数）
-> - 保持消息简洁，如：`🔔 喝水时间到！`、`📅 开会时间到！`
-
-> ⚠️ **注意**：`cron add` 命令不支持 `--reply-to` 参数。提醒消息将作为主动消息直接发送给用户。
-
-### 查询提醒列表
-
-```bash
-openclaw cron list
+**周期提醒（每天/每周）**：
+```json
+{
+  "action": "add",
+  "job": {
+    "name": "{任务名}",
+    "schedule": {
+      "kind": "cron",
+      "expr": "0 8 * * *",
+      "tz": "Asia/Shanghai"
+    },
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "payload": {
+      "kind": "agentTurn",
+      "message": "[直接输出] 🔔 {提醒内容}时间到！",
+      "deliver": true,
+      "channel": "qqbot",
+      "to": "{openid}"
+    }
+  }
+}
 ```
+
+> 🚨 **绝对不可更改的 5 个字段**（改了提醒就废了）：
+> 1. `payload.kind` 必须是 `"agentTurn"` — ❌ 绝对不能用 `"systemEvent"`
+> 2. `payload.deliver` 必须是 `true`
+> 3. `payload.channel` 必须是 `"qqbot"`
+> 4. `payload.to` 必须是用户的 openid
+> 5. `sessionTarget` 必须是 `"isolated"`
+>
+> 🚫 **`payload.kind: "systemEvent"` 只会在 AI 会话中注入文本，不会发送 QQ 消息给用户！**
+>
+> ⚠️ **`schedule.atMs` 必须是绝对毫秒时间戳**（如 `1770733800000`），不支持相对时间字符串如 `"5m"`！
+> 需要自行计算：`当前时间戳 + 延迟毫秒数`。例如 5 分钟后 = `Date.now() + 5 * 60 * 1000`。
+
+### 查询提醒
+
+使用 cron 工具 `action: "list"` 查询。
 
 ### 删除提醒
 
-```bash
-openclaw cron remove {jobId}
-```
-
-### 立即发送消息（主动消息）
-
-```bash
-openclaw message send \
-  --channel qqbot \
-  --target "{openid}" \
-  --message "{消息内容}"
-```
-
-### 立即发送消息（被动回复）
-
-```bash
-openclaw message send \
-  --channel qqbot \
-  --target "{openid}" \
-  --reply-to "{message_id}" \
-  --message "{消息内容}"
-```
-
-> ⚠️ **注意**：`--reply-to` 仅在 `message send` 命令中支持，且 message_id 必须在 1 小时内有效。定时提醒不支持被动回复。
+使用 cron 工具 `action: "remove"` + `jobId`。
 
 ---
 
@@ -149,77 +166,64 @@ openclaw message send \
 
 ## ⏱️ 时间格式
 
-### 相对时间（--at）
+### 一次性提醒（schedule.kind = "at"）
 
-> ⚠️ **不要加 + 号！** 用 `5m` 而不是 `+5m`
+> ⚠️ `schedule.atMs` 只接受**绝对毫秒时间戳**，需要自己计算！
 
-| 用户说法 | 参数值 |
-|----------|--------|
-| 5分钟后 | `5m` |
-| 半小时后 | `30m` |
-| 1小时后 | `1h` |
-| 2小时后 | `2h` |
-| 明天这时候 | `24h` |
+| 用户说法 | 计算方式 |
+|----------|----------|
+| 5分钟后 | `Date.now() + 5 * 60 * 1000` |
+| 半小时后 | `Date.now() + 30 * 60 * 1000` |
+| 1小时后 | `Date.now() + 60 * 60 * 1000` |
+| 明天早上8点 | 先确认当前日期，计算目标时间的毫秒时间戳 |
 
-### 绝对时间（--at）
+### 周期提醒（schedule.kind = "cron"）
 
-| 用户说法 | 参数值 |
-|----------|--------|
-| 今天下午3点 | `2026-02-01T15:00:00+08:00` |
-| 明天早上8点 | `2026-02-02T08:00:00+08:00` |
-| 2月14日中午 | `2026-02-14T12:00:00+08:00` |
+> 必须加 `"tz": "Asia/Shanghai"`
 
-### Cron 表达式（--cron）
-
-| 用户说法 | Cron 表达式 | 必须加 `--tz "Asia/Shanghai"` |
-|----------|-------------|------------------------------|
-| 每天早上8点 | `0 8 * * *` | ✅ |
-| 每天晚上10点 | `0 22 * * *` | ✅ |
-| 每个工作日早上9点 | `0 9 * * 1-5` | ✅ |
-| 每周一早上9点 | `0 9 * * 1` | ✅ |
-| 每周末上午10点 | `0 10 * * 0,6` | ✅ |
-| 每小时整点 | `0 * * * *` | ✅ |
+| 用户说法 | schedule.expr |
+|----------|---------------|
+| 每天早上8点 | `"0 8 * * *"` |
+| 每天晚上10点 | `"0 22 * * *"` |
+| 每个工作日早上9点 | `"0 9 * * 1-5"` |
+| 每周一早上9点 | `"0 9 * * 1"` |
+| 每周末上午10点 | `"0 10 * * 0,6"` |
+| 每小时整点 | `"0 * * * *"` |
 
 ---
 
 ## 📌 参数说明
 
-### 必填参数
+### 工具调用 job 对象必填字段
 
-| 参数 | 说明 | 示例 |
+| 字段 | 说明 | 示例 |
 |------|------|------|
-| `--name` | 任务名，含用户标识 | `"喝水提醒"` |
-| `--at` / `--cron` | 触发时间（二选一） | `5m` / `0 8 * * *` |
-| `--message` | **提醒内容**（见下方模板） | `"🔔 喝水时间到！"` |
-| `--deliver` | 启用投递 | 固定值 |
-| `--channel qqbot` | QQ 渠道 | 固定值 |
-| `--to` | 接收者 openid | 使用【当前消息上下文】中的"提醒目标地址"值 |
+| `job.name` | 任务名 | `"喝水提醒"` |
+| `job.schedule.kind` | `"at"` 或 `"cron"` | `"at"` |
+| `job.schedule.atMs` | **绝对毫秒时间戳**（不支持 `"5m"`！） | `1770734100000` |
+| `job.sessionTarget` | 必须 `"isolated"` | `"isolated"` |
+| `job.wakeMode` | 推荐 `"now"` | `"now"` |
+| `job.payload.kind` | 必须 `"agentTurn"`（❌ 不能用 `"systemEvent"`） | `"agentTurn"` |
+| `job.payload.message` | 以 `[直接输出]` 开头 | `"[直接输出] 💧 喝水时间到！"` |
+| `job.payload.deliver` | 必须 `true` | `true` |
+| `job.payload.channel` | 必须 `"qqbot"` | `"qqbot"` |
+| `job.payload.to` | 用户 openid | 从系统消息获取 |
+| `job.deleteAfterRun` | 一次性任务必须 `true` | `true` |
 
-### 推荐参数
+### payload.message 提醒内容模板
 
-| 参数 | 说明 | 何时使用 |
-|------|------|----------|
-| `--delete-after-run` | 执行后删除 | **一次性任务必须** |
-| `--tz "Asia/Shanghai"` | 时区 | **周期任务必须** |
-
-### --message 提醒内容模板（最关键）
-
-> ⚠️ **`--message` 的内容会直接发送给用户**，所以要写清楚提醒内容！
+> ⚠️ **`payload.message` 的内容会直接发送给用户**，所以要写清楚提醒内容！
 
 **模板格式**：
 ```
---message "🔔 {提醒内容}时间到！"
+[直接输出] 🔔 {提醒内容}时间到！
 ```
 
 **示例**：
-- 喝水：`--message "💧 喝水时间到！"`
-- 开会：`--message "📅 开会时间到！"`
-- 打卡：`--message "🌅 打卡时间到！"`
-- 日报：`--message "📝 写日报时间到！"`
-
-**为什么这样写？**
-- 消息内容会直接发送，不经过 AI 处理
-- 保持简洁，一目了然
+- 喝水：`"[直接输出] 💧 喝水时间到！"`
+- 开会：`"[直接输出] 📅 开会时间到！"`
+- 打卡：`"[直接输出] 🌅 打卡时间到！"`
+- 日报：`"[直接输出] 📝 写日报时间到！"`
 
 ---
 
@@ -229,27 +233,29 @@ openclaw message send \
 
 **用户**: 5分钟后提醒我喝水
 
-**AI 执行**:
-```bash
-openclaw cron add \
-  --name "喝水提醒" \
-  --at "5m" \
-  --message "💧 喝水时间到！" \
-  --deliver \
-  --channel qqbot \
-  --to "{openid}" \
-  --delete-after-run
+**AI 调用 cron 工具**（假设当前时间戳为 1770734000000）:
+```json
+{
+  "action": "add",
+  "job": {
+    "name": "喝水提醒",
+    "schedule": { "kind": "at", "atMs": 1770734300000 },
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "deleteAfterRun": true,
+    "payload": {
+      "kind": "agentTurn",
+      "message": "[直接输出] 💧 喝水时间到！",
+      "deliver": true,
+      "channel": "qqbot",
+      "to": "{openid}"
+    }
+  }
+}
 ```
+> `atMs` = 当前时间戳 + 5 * 60 * 1000 = 1770734000000 + 300000 = 1770734300000
 
-**AI 回复**:
-```
-⏰ 好的，5分钟后提醒你喝水~
-```
-
-**5分钟后用户收到**:
-```
-💧 喝水时间到！
-```
+**AI 回复**: `⏰ 好的，5分钟后提醒你喝水~`
 
 ---
 
@@ -257,24 +263,28 @@ openclaw cron add \
 
 **用户**: 每天早上8点提醒我打卡
 
-**AI 执行**:
-```bash
-openclaw cron add \
-  --name "打卡提醒" \
-  --cron "0 8 * * *" \
-  --tz "Asia/Shanghai" \
-  --message "🌅 打卡时间到！" \
-  --deliver \
-  --channel qqbot \
-  --to "{openid}"
+**AI 调用 cron 工具**:
+```json
+{
+  "action": "add",
+  "job": {
+    "name": "打卡提醒",
+    "schedule": { "kind": "cron", "expr": "0 8 * * *", "tz": "Asia/Shanghai" },
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "payload": {
+      "kind": "agentTurn",
+      "message": "[直接输出] 🌅 打卡时间到！",
+      "deliver": true,
+      "channel": "qqbot",
+      "to": "{openid}"
+    }
+  }
+}
 ```
+> 周期任务**不加** `deleteAfterRun`
 
-**AI 回复**:
-```
-⏰ 收到，每天早上8点提醒你打卡~
-```
-
-> 💡 周期任务**不加** `--delete-after-run`
+**AI 回复**: `⏰ 收到，每天早上8点提醒你打卡~`
 
 ---
 
@@ -282,22 +292,27 @@ openclaw cron add \
 
 **用户**: 工作日下午6点提醒我写日报
 
-**AI 执行**:
-```bash
-openclaw cron add \
-  --name "日报提醒" \
-  --cron "0 18 * * 1-5" \
-  --tz "Asia/Shanghai" \
-  --message "📝 写日报时间到！" \
-  --deliver \
-  --channel qqbot \
-  --to "{openid}"
+**AI 调用 cron 工具**:
+```json
+{
+  "action": "add",
+  "job": {
+    "name": "日报提醒",
+    "schedule": { "kind": "cron", "expr": "0 18 * * 1-5", "tz": "Asia/Shanghai" },
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "payload": {
+      "kind": "agentTurn",
+      "message": "[直接输出] 📝 写日报时间到！",
+      "deliver": true,
+      "channel": "qqbot",
+      "to": "{openid}"
+    }
+  }
+}
 ```
 
-**AI 回复**:
-```
-⏰ 收到，工作日下午6点提醒你写日报~
-```
+**AI 回复**: `⏰ 收到，工作日下午6点提醒你写日报~`
 
 ---
 
@@ -305,27 +320,29 @@ openclaw cron add \
 
 **用户**: 3分钟后提醒我开会
 
-**AI 执行**:
-```bash
-openclaw cron add \
-  --name "开会提醒" \
-  --at "3m" \
-  --message "📅 开会时间到！" \
-  --deliver \
-  --channel qqbot \
-  --to "{openid}" \
-  --delete-after-run
+**AI 调用 cron 工具**（假设当前时间戳为 1770734000000）:
+```json
+{
+  "action": "add",
+  "job": {
+    "name": "开会提醒",
+    "schedule": { "kind": "at", "atMs": 1770734180000 },
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "deleteAfterRun": true,
+    "payload": {
+      "kind": "agentTurn",
+      "message": "[直接输出] 📅 开会时间到！",
+      "deliver": true,
+      "channel": "qqbot",
+      "to": "{openid}"
+    }
+  }
+}
 ```
+> `atMs` = 当前时间戳 + 3 * 60 * 1000
 
-**AI 回复**:
-```
-⏰ 好的，3分钟后提醒你开会~
-```
-
-**3分钟后用户收到**:
-```
-📅 开会时间到！
-```
+**AI 回复**: `⏰ 好的，3分钟后提醒你开会~`
 
 ---
 
@@ -333,19 +350,26 @@ openclaw cron add \
 
 **用户**（群聊）: 每天早上9点提醒大家站会
 
-**AI 执行**:
-```bash
-openclaw cron add \
-  --name "站会提醒" \
-  --cron "0 9 * * 1-5" \
-  --tz "Asia/Shanghai" \
-  --message "📢 站会时间到！" \
-  --deliver \
-  --channel qqbot \
-  --to "group:{group_openid}"
+**AI 调用 cron 工具**:
+```json
+{
+  "action": "add",
+  "job": {
+    "name": "站会提醒",
+    "schedule": { "kind": "cron", "expr": "0 9 * * 1-5", "tz": "Asia/Shanghai" },
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "payload": {
+      "kind": "agentTurn",
+      "message": "[直接输出] 📢 站会时间到！",
+      "deliver": true,
+      "channel": "qqbot",
+      "to": "group:{group_openid}"
+    }
+  }
+}
 ```
-
-> 💡 群组使用 `group:{group_openid}` 格式
+> 群组使用 `"group:{group_openid}"` 格式
 
 ---
 
@@ -353,10 +377,7 @@ openclaw cron add \
 
 **用户**: 我有哪些提醒？
 
-**AI 执行**:
-```bash
-openclaw cron list
-```
+**AI 调用 cron 工具**：`{ "action": "list" }`
 
 **AI 回复**（根据返回结果）:
 ```
@@ -375,8 +396,8 @@ openclaw cron list
 **用户**: 取消打卡提醒
 
 **AI 执行**:
-1. 先执行 `openclaw cron list` 找到对应任务 ID
-2. 执行 `openclaw cron remove {jobId}`
+1. 先用 `{ "action": "list" }` 找到对应任务 ID
+2. 再用 `{ "action": "remove", "jobId": "{id}" }` 删除
 
 **AI 回复**:
 ```
@@ -391,7 +412,6 @@ openclaw cron list
 
 定时提醒**只能发送主动消息**，因为：
 - 提醒执行时，原始 message_id 通常已超过 1 小时有效期
-- `openclaw cron add` 命令不支持 `--reply-to` 参数
 
 ```
 ┌─────────────────────┐
@@ -399,20 +419,20 @@ openclaw cron list
 └──────────┬──────────┘
            ↓
 ┌─────────────────────┐
-│ AI 通过 system-event │
-│ 获取用户上下文信息   │
+│ AI 通过 agentTurn   │
+│ 在隔离会话中执行     │
 └──────────┬──────────┘
            ↓
 ┌─────────────────────┐
-│ 发送主动消息到用户   │
-│ --channel qqbot     │
-│ --to {openid}       │
+│ deliver=true 投递    │
+│ channel="qqbot"     │
+│ to="{openid}"       │
 └──────────┬──────────┘
            ↓
     ✅ 用户收到提醒
 ```
 
-### 即时回复（message send）
+### 即时回复
 
 即时消息发送支持被动回复（如果 message_id 有效）：
 
@@ -422,8 +442,7 @@ openclaw cron list
                 └──────────┬──────────┘
                            ↓
          ┌──────────────────────────────┐
-         │ 有 --reply-to 且 message_id  │
-         │ 在 1 小时内有效？             │
+         │ message_id 在 1 小时内有效？ │
          └──────────────────────────────┘
                ↓                ↓
               是               否
@@ -444,7 +463,7 @@ openclaw cron list
 | **回复次数限制** | 同一 message_id 最多回复 4 次 |
 | **主动消息权限** | ⚠️ **QQ 机器人需要申请主动消息权限**，否则定时提醒会发送失败 |
 | **主动消息限制** | 只能发给与机器人交互过的用户（24小时内） |
-| **消息内容** | `--message` 不能为空 |
+| **消息内容** | `payload.message` 不能为空 |
 
 ### ⚠️ 主动消息权限说明
 
