@@ -193,7 +193,7 @@ openclaw message send \
 | `--message` | **提醒内容**（见下方模板） | `"🔔 喝水时间到！"` |
 | `--deliver` | 启用投递 | 固定值 |
 | `--channel qqbot` | QQ 渠道 | 固定值 |
-| `--to` | 接收者 openid | 从系统消息获取 |
+| `--to` | 接收者 openid | 使用【当前消息上下文】中的"提醒目标地址"值 |
 
 ### 推荐参数
 
@@ -485,6 +485,7 @@ openclaw cron list
 | 群组 openid | `group:FeC1ADaf-...` | 系统消息自动提供 |
 | message_id | `ROBOT1.0_xxx` | 系统消息自动提供 |
 
-> 💡 这些信息在系统消息中格式如：
-> - `当前用户 openid: B3EA9A1d-...`
-> - `当前消息 message_id: ROBOT1.0_...`
+> 💡 这些信息在【当前消息上下文】中提供：
+> - `用户: 昵称 (openid)`
+> - `消息ID: ROBOT1.0_...`
+> - `提醒目标地址: openid 或 group:openid`
