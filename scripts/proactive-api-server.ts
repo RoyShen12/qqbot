@@ -49,14 +49,15 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
           clientSecret: envClientSecret,
           enabled: true,
           secretSource: "env",
+          config: {},
         };
       }
       return null;
     }
-    
+
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     const qqbot = config.channels?.qqbot;
-    
+
     if (!qqbot) {
       if (envAppId && envClientSecret) {
         return {
@@ -65,11 +66,12 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
           clientSecret: envClientSecret,
           enabled: true,
           secretSource: "env",
+          config: {},
         };
       }
       return null;
     }
-    
+
     // 解析账户配置
     if (accountId === "default") {
       return {
@@ -78,9 +80,10 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
         clientSecret: qqbot.clientSecret || envClientSecret,
         enabled: qqbot.enabled ?? true,
         secretSource: qqbot.clientSecret ? "config" : "env",
+        config: qqbot,
       };
     }
-    
+
     const accountConfig = qqbot.accounts?.[accountId];
     if (accountConfig) {
       return {
@@ -89,6 +92,7 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
         clientSecret: accountConfig.clientSecret || qqbot.clientSecret || envClientSecret,
         enabled: accountConfig.enabled ?? true,
         secretSource: accountConfig.clientSecret ? "config" : "env",
+        config: accountConfig,
       };
     }
     

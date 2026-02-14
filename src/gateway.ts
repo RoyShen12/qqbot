@@ -262,6 +262,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   let shouldRefreshToken = false; // 下次连接是否需要刷新 token
   let intentLevelIndex = 0; // 当前尝试的权限级别索引
   let lastSuccessfulIntentLevel = -1; // 上次成功的权限级别
+  let connectionGeneration = 0; // 连接代次，用于忽略旧连接的迟到回调
 
   // ============ P1-2: 尝试从持久化存储恢复 Session ============
   const savedSession = loadSession(account.accountId);
@@ -396,16 +397,22 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     }
     isConnecting = true;
 
-    // 防止 isConnecting 永久卡住：30 秒超时自动重置
+    // 防止 isConnecting 永久卡住：30 秒超时自动 cleanup 并重连
     const connectTimeoutId = setTimeout(() => {
       if (isConnecting) {
-        log?.error(`[qqbot:${account.accountId}] Connect timeout (30s), resetting isConnecting flag`);
+        log?.error(`[qqbot:${account.accountId}] Connect timeout (30s), cleaning up and scheduling reconnect`);
         isConnecting = false;
+        cleanup();
+        scheduleReconnect();
       }
     }, 30000);
 
     try {
       cleanup();
+
+      // 递增连接代次，用于忽略旧连接的迟到回调
+      connectionGeneration++;
+      const thisGeneration = connectionGeneration;
 
       // 如果标记了需要刷新 token，则清除缓存
       if (shouldRefreshToken) {
@@ -1382,12 +1389,15 @@ openclaw cron add \\
           try {
             await Promise.race([dispatchPromise, timeoutPromise]);
           } catch (err) {
-            if (timeoutId) {
-              clearTimeout(timeoutId);
-            }
             if (!hasResponse) {
               log?.error(`[qqbot:${account.accountId}] No response within timeout`);
               await sendErrorMessage("QQ已经收到了你的请求并转交给了Openclaw，任务可能比较复杂，正在处理中...");
+            }
+          } finally {
+            // 确保定时器总是被清理，防止泄漏
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
             }
           }
         } catch (err) {
@@ -1437,7 +1447,13 @@ openclaw cron add \\
           switch (op) {
             case 10: // Hello
               log?.info(`[qqbot:${account.accountId}] Hello received`);
-              
+
+              // 运行时校验 d 字段
+              if (!d || typeof d !== "object" || !("heartbeat_interval" in d)) {
+                log?.error(`[qqbot:${account.accountId}] Invalid Hello payload: missing heartbeat_interval`);
+                break;
+              }
+
               // 如果有 session_id，尝试 Resume
               if (sessionId && lastSeq !== null) {
                 log?.info(`[qqbot:${account.accountId}] Attempting to resume session ${sessionId}`);
@@ -1467,6 +1483,10 @@ openclaw cron add \\
 
               // 启动心跳
               const interval = (d as { heartbeat_interval: number }).heartbeat_interval;
+              if (typeof interval !== "number" || interval <= 0) {
+                log?.error(`[qqbot:${account.accountId}] Invalid heartbeat_interval: ${interval}`);
+                break;
+              }
               if (heartbeatInterval) clearInterval(heartbeatInterval);
               heartbeatInterval = setInterval(() => {
                 if (ws.readyState === WebSocket.OPEN) {
@@ -1478,6 +1498,10 @@ openclaw cron add \\
 
             case 0: // Dispatch
               if (t === "READY") {
+                if (!d || typeof d !== "object" || !("session_id" in d) || typeof (d as Record<string, unknown>).session_id !== "string") {
+                  log?.error(`[qqbot:${account.accountId}] Invalid READY payload: missing session_id`);
+                  break;
+                }
                 const readyData = d as { session_id: string };
                 sessionId = readyData.session_id;
                 // 记录成功的权限级别
@@ -1508,6 +1532,10 @@ openclaw cron add \\
                   });
                 }
               } else if (t === "C2C_MESSAGE_CREATE") {
+                if (!d || typeof d !== "object" || !("author" in d) || !("id" in d)) {
+                  log?.error(`[qqbot:${account.accountId}] Invalid C2C_MESSAGE_CREATE payload, skipping`);
+                  break;
+                }
                 const event = d as C2CMessageEvent;
                 // P1-3: 记录已知用户
                 recordKnownUser({
@@ -1525,6 +1553,10 @@ openclaw cron add \\
                   attachments: event.attachments,
                 });
               } else if (t === "AT_MESSAGE_CREATE") {
+                if (!d || typeof d !== "object" || !("author" in d) || !("id" in d) || !("channel_id" in d)) {
+                  log?.error(`[qqbot:${account.accountId}] Invalid AT_MESSAGE_CREATE payload, skipping`);
+                  break;
+                }
                 const event = d as GuildMessageEvent;
                 // P1-3: 记录已知用户（频道用户）
                 recordKnownUser({
@@ -1545,6 +1577,10 @@ openclaw cron add \\
                   attachments: event.attachments,
                 });
               } else if (t === "DIRECT_MESSAGE_CREATE") {
+                if (!d || typeof d !== "object" || !("author" in d) || !("id" in d) || !("channel_id" in d)) {
+                  log?.error(`[qqbot:${account.accountId}] Invalid DIRECT_MESSAGE_CREATE payload, skipping`);
+                  break;
+                }
                 const event = d as GuildMessageEvent;
                 // P1-3: 记录已知用户（频道私信用户）
                 recordKnownUser({
@@ -1565,6 +1601,10 @@ openclaw cron add \\
                   attachments: event.attachments,
                 });
               } else if (t === "GROUP_AT_MESSAGE_CREATE") {
+                if (!d || typeof d !== "object" || !("author" in d) || !("id" in d) || !("group_openid" in d)) {
+                  log?.error(`[qqbot:${account.accountId}] Invalid GROUP_AT_MESSAGE_CREATE payload, skipping`);
+                  break;
+                }
                 const event = d as GroupMessageEvent;
                 // P1-3: 记录已知用户（群组用户）
                 recordKnownUser({
@@ -1596,7 +1636,7 @@ openclaw cron add \\
               break;
 
             case 9: // Invalid Session
-              const canResume = d as boolean;
+              const canResume = typeof d === "boolean" ? d : false;
               const currentLevel = INTENT_LEVELS[intentLevelIndex];
               log?.error(`[qqbot:${account.accountId}] Invalid session (${currentLevel.description}), can resume: ${canResume}, raw: ${rawData}`);
               
@@ -1631,6 +1671,12 @@ openclaw cron add \\
         log?.info(`[qqbot:${account.accountId}] WebSocket closed: ${code} ${reason.toString()}`);
         clearTimeout(connectTimeoutId);
         isConnecting = false; // 释放锁
+
+        // 忽略旧连接的迟到 close 回调
+        if (thisGeneration !== connectionGeneration) {
+          log?.info(`[qqbot:${account.accountId}] Ignoring close from stale connection (gen ${thisGeneration}, current ${connectionGeneration})`);
+          return;
+        }
         
         // 根据错误码处理
         // 4009: 可以重新发起 resume
@@ -1689,6 +1735,11 @@ openclaw cron add \\
 
       ws.on("error", (err) => {
         log?.error(`[qqbot:${account.accountId}] WebSocket error: ${err.message}`);
+        // 忽略旧连接的迟到 error 回调
+        if (thisGeneration !== connectionGeneration) {
+          log?.info(`[qqbot:${account.accountId}] Ignoring error from stale connection (gen ${thisGeneration}, current ${connectionGeneration})`);
+          return;
+        }
         onError?.(err);
       });
 

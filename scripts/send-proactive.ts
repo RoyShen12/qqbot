@@ -60,7 +60,7 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
       // 尝试从环境变量获取
       const appId = process.env.QQBOT_APP_ID;
       const clientSecret = process.env.QQBOT_CLIENT_SECRET;
-      
+
       if (appId && clientSecret) {
         return {
           accountId,
@@ -68,21 +68,22 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
           clientSecret,
           enabled: true,
           secretSource: "env",
+          config: {},
         };
       }
-      
+
       console.error("配置文件不存在且环境变量未设置");
       return null;
     }
-    
+
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     const qqbot = config.channels?.qqbot;
-    
+
     if (!qqbot) {
       console.error("配置中没有 qqbot 配置");
       return null;
     }
-    
+
     // 解析账户配置
     if (accountId === "default") {
       return {
@@ -91,9 +92,10 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
         clientSecret: qqbot.clientSecret || process.env.QQBOT_CLIENT_SECRET,
         enabled: qqbot.enabled ?? true,
         secretSource: qqbot.clientSecret ? "config" : "env",
+        config: qqbot,
       };
     }
-    
+
     const accountConfig = qqbot.accounts?.[accountId];
     if (accountConfig) {
       return {
@@ -102,6 +104,7 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
         clientSecret: accountConfig.clientSecret || qqbot.clientSecret || process.env.QQBOT_CLIENT_SECRET,
         enabled: accountConfig.enabled ?? true,
         secretSource: accountConfig.clientSecret ? "config" : "env",
+        config: accountConfig,
       };
     }
     
@@ -175,7 +178,7 @@ QQBot 主动消息 CLI 工具
     console.log("─".repeat(100));
     
     for (const user of users) {
-      const lastTime = new Date(user.lastInteractionAt).toLocaleString();
+      const lastTime = new Date(user.lastSeenAt).toLocaleString();
       console.log(`${user.type}\t\t${user.openid.slice(0, 20)}...\t${user.nickname || "-"}\t\t${lastTime}`);
     }
     return;
