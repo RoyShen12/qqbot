@@ -128,6 +128,9 @@ export function flushKnownUsers(): void {
   doSaveUsersToFile();
 }
 
+// Safety net: flush pending writes on process exit
+process.on("exit", () => { flushKnownUsers(); });
+
 /**
  * 生成用户唯一键
  */

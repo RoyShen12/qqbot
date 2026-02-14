@@ -371,8 +371,31 @@ export async function sendProactiveMessage(
  * ```
  */
 export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResult> {
-  const { to, text, replyToId, account } = ctx;
+  const { to, text, account } = ctx;
+  let { replyToId } = ctx;
   const { mediaUrl } = ctx;
+  let fallbackToProactive = false;
+
+  // ============ 消息回复限流检查 ============
+  if (replyToId) {
+    const limitCheck = checkMessageReplyLimit(replyToId);
+
+    if (!limitCheck.allowed) {
+      if (limitCheck.shouldFallbackToProactive) {
+        console.warn(`[qqbot] sendMedia: 被动回复不可用，降级为主动消息 - ${limitCheck.message}`);
+        fallbackToProactive = true;
+        replyToId = null;
+      } else {
+        console.error(`[qqbot] sendMedia: 消息回复被限流但未设置降级 - ${limitCheck.message}`);
+        return {
+          channel: "qqbot",
+          error: limitCheck.message
+        };
+      }
+    } else {
+      console.log(`[qqbot] sendMedia: 消息 ${replyToId} 剩余被动回复次数: ${limitCheck.remaining}/${MESSAGE_REPLY_LIMIT}`);
+    }
+  }
 
   if (!account.appId || !account.clientSecret) {
     return { channel: "qqbot", error: "QQBot not configured (missing appId or clientSecret)" };
@@ -479,6 +502,7 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
       const displayUrl = isLocalPath ? "[本地文件]" : mediaUrl;
       const textWithUrl = text ? `${text}\n${displayUrl}` : displayUrl;
       const result = await sendChannelMessage(accessToken, target.id, textWithUrl, replyToId ?? undefined);
+      if (replyToId) recordMessageReply(replyToId);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     }
 
@@ -495,6 +519,9 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
         console.error(`[qqbot] Failed to send text after image: ${textErr}`);
       }
     }
+
+    // 记录回复次数
+    if (replyToId) recordMessageReply(replyToId);
 
   return { channel: "qqbot", messageId: imageResult.id, timestamp: imageResult.timestamp };
   } catch (err) {

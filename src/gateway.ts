@@ -277,6 +277,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   const messageQueue: QueuedMessage[] = [];
   let messageProcessorRunning = false;
   let messagesProcessed = 0; // 统计已处理消息数
+  let currentMessageHandler: ((msg: QueuedMessage) => Promise<void>) | null = null;
 
   /**
    * 将消息加入队列（非阻塞）
@@ -296,8 +297,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
   /**
    * 启动消息处理循环（独立于 WS 消息循环）
+   * 使用 currentMessageHandler 间接引用，支持重连时更新 handler
    */
-  const startMessageProcessor = (handleMessageFn: (msg: QueuedMessage) => Promise<void>): void => {
+  const startMessageProcessor = (): void => {
     if (messageProcessorRunning) return;
     messageProcessorRunning = true;
 
@@ -311,7 +313,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
         const msg = messageQueue.shift()!;
         try {
-          await handleMessageFn(msg);
+          if (currentMessageHandler) {
+            await currentMessageHandler(msg);
+          }
           messagesProcessed++;
         } catch (err) {
           // 捕获处理异常，防止影响队列循环
@@ -392,6 +396,14 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     }
     isConnecting = true;
 
+    // 防止 isConnecting 永久卡住：30 秒超时自动重置
+    const connectTimeoutId = setTimeout(() => {
+      if (isConnecting) {
+        log?.error(`[qqbot:${account.accountId}] Connect timeout (30s), resetting isConnecting flag`);
+        isConnecting = false;
+      }
+    }, 30000);
+
     try {
       cleanup();
 
@@ -438,11 +450,15 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           direction: "inbound",
         });
 
-        try{
-          await sendC2CInputNotify(accessToken, event.senderId, event.messageId, 60);
-          log?.info(`[qqbot:${account.accountId}] Sent input notify to ${event.senderId}`);
-        }catch(err){
-          log?.error(`[qqbot:${account.accountId}] sendC2CInputNotify error: ${err}`);
+        // 仅对 C2C 私聊消息发送输入状态通知
+        if (event.type === "c2c") {
+          try {
+            const freshToken = await getAccessToken(account.appId, account.clientSecret);
+            await sendC2CInputNotify(freshToken, event.senderId, event.messageId, 60);
+            log?.info(`[qqbot:${account.accountId}] Sent input notify to ${event.senderId}`);
+          } catch(err) {
+            log?.error(`[qqbot:${account.accountId}] sendC2CInputNotify error: ${err}`);
+          }
         }
 
         const isGroup = event.type === "guild" || event.type === "group";
@@ -678,8 +694,14 @@ openclaw cron add \\
           entry.toUpperCase() === event.senderId.toUpperCase()
         );
 
+        // MediaPath/MediaPaths: 图片本地路径，供 OpenClaw 核心以多模态方式传给 AI 模型
+        const imageMediaTypes = event.attachments
+          ?.filter(att => att.content_type?.startsWith("image/"))
+          .map(att => att.content_type) ?? [];
+
         const ctxPayload = pluginRuntime.channel.reply.finalizeInboundContext({
           Body: body,
+          BodyForAgent: messageBody,
           RawBody: event.content,
           CommandBody: event.content,
           From: fromAddress,
@@ -699,6 +721,18 @@ openclaw cron add \\
           QQGuildId: event.guildId,
           QQGroupOpenid: event.groupOpenid,
           CommandAuthorized: commandAuthorized,
+          // 图片多模态支持
+          ...(imageUrls.length > 0 ? {
+            // MediaPath/MediaPaths 仅包含本地文件路径
+            ...(imageUrls.some(p => !p.startsWith("http://") && !p.startsWith("https://")) ? {
+              MediaPath: imageUrls.find(p => !p.startsWith("http://") && !p.startsWith("https://")),
+              MediaPaths: imageUrls.filter(p => !p.startsWith("http://") && !p.startsWith("https://")),
+            } : {}),
+            MediaType: imageMediaTypes[0],
+            MediaUrl: imageUrls[0],
+            MediaUrls: imageUrls,
+            MediaTypes: imageMediaTypes,
+          } : {}),
         });
 
         // 发送消息的辅助函数，带 token 过期重试
@@ -850,13 +884,15 @@ openclaw cron add \\
                         
                         if (isLocalPath) {
                           // 本地文件：转换为 Base64 Data URL
-                          if (!fs.existsSync(imagePath)) {
+                          try {
+                            await fs.promises.access(imagePath);
+                          } catch {
                             log?.error(`[qqbot:${account.accountId}] Image file not found: ${imagePath}`);
                             await sendErrorMessage(`图片文件不存在: ${imagePath}`);
                             continue;
                           }
-                          
-                          const fileBuffer = fs.readFileSync(imagePath);
+
+                          const fileBuffer = await fs.promises.readFile(imagePath);
                           const base64Data = fileBuffer.toString("base64");
                           const ext = path.extname(imagePath).toLowerCase();
                           const mimeTypes: Record<string, string> = {
@@ -972,11 +1008,13 @@ openclaw cron add \\
                         // 如果是本地文件，转换为 Base64 Data URL
                         if (parsedPayload.source === "file") {
                           try {
-                            if (!fs.existsSync(imageUrl)) {
+                            try {
+                              await fs.promises.access(imageUrl);
+                            } catch {
                               await sendErrorMessage(`[QQBot] 图片文件不存在: ${imageUrl}`);
                               return;
                             }
-                            const fileBuffer = fs.readFileSync(imageUrl);
+                            const fileBuffer = await fs.promises.readFile(imageUrl);
                             const base64Data = fileBuffer.toString("base64");
                             const ext = path.extname(imageUrl).toLowerCase();
                             const mimeTypes: Record<string, string> = {
@@ -1364,11 +1402,13 @@ openclaw cron add \\
 
       ws.on("open", () => {
         log?.info(`[qqbot:${account.accountId}] WebSocket connected`);
+        clearTimeout(connectTimeoutId);
         isConnecting = false; // 连接完成，释放锁
         reconnectAttempts = 0; // 连接成功，重置重试计数
         lastConnectTime = Date.now(); // 记录连接时间
         // 启动消息处理器（异步处理，防止阻塞心跳）
-        startMessageProcessor(handleMessage);
+        currentMessageHandler = handleMessage;
+        startMessageProcessor();
         // P1-1: 启动后台 Token 刷新
         startBackgroundTokenRefresh(account.appId, account.clientSecret, {
           log: log as { info: (msg: string) => void; error: (msg: string) => void; debug?: (msg: string) => void },
@@ -1524,6 +1564,7 @@ openclaw cron add \\
                   content: event.content,
                   messageId: event.id,
                   timestamp: event.timestamp,
+                  channelId: event.channel_id,
                   guildId: event.guild_id,
                   attachments: event.attachments,
                 });
@@ -1592,6 +1633,7 @@ openclaw cron add \\
 
       ws.on("close", (code, reason) => {
         log?.info(`[qqbot:${account.accountId}] WebSocket closed: ${code} ${reason.toString()}`);
+        clearTimeout(connectTimeoutId);
         isConnecting = false; // 释放锁
         
         // 根据错误码处理
@@ -1655,6 +1697,7 @@ openclaw cron add \\
       });
 
     } catch (err) {
+      clearTimeout(connectTimeoutId);
       isConnecting = false; // 释放锁
       const errMsg = String(err);
       log?.error(`[qqbot:${account.accountId}] Connection failed: ${err}`);

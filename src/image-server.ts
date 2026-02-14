@@ -38,6 +38,7 @@ const DEFAULT_CONFIG: Required<ImageServerConfig> = {
 };
 
 let serverInstance: http.Server | null = null;
+let cleanupTimer: ReturnType<typeof setInterval> | null = null;
 let currentConfig: Required<ImageServerConfig> = { ...DEFAULT_CONFIG };
 let imageIndex = new Map<string, StoredImage>();
 
@@ -213,13 +214,20 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       return;
     }
 
-    const imageData = fs.readFileSync(filePath);
+    const stat = fs.statSync(filePath);
     res.writeHead(200, {
       "Content-Type": image.mimeType,
-      "Content-Length": imageData.length,
+      "Content-Length": stat.size,
       "Cache-Control": image.ttl > 0 ? `max-age=${image.ttl}` : "max-age=31536000",
     });
-    res.end(imageData);
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+      }
+      res.end("Internal Server Error");
+    });
   } catch (err) {
     res.writeHead(500, { "Content-Type": "text/plain" });
     res.end("Internal Server Error");
@@ -248,12 +256,13 @@ export function startImageServer(config?: Partial<ImageServerConfig>): Promise<s
     loadImageIndex();
 
     // 启动定期清理
-    const cleanupInterval = setInterval(cleanupExpiredImages, 60000); // 每分钟清理一次
+    cleanupTimer = setInterval(cleanupExpiredImages, 60000); // 每分钟清理一次
 
     serverInstance = http.createServer(handleRequest);
 
     serverInstance.on("error", (err) => {
-      clearInterval(cleanupInterval);
+      clearInterval(cleanupTimer!);
+      cleanupTimer = null;
       reject(err);
     });
 
@@ -269,6 +278,10 @@ export function startImageServer(config?: Partial<ImageServerConfig>): Promise<s
  */
 export function stopImageServer(): Promise<void> {
   return new Promise((resolve) => {
+    if (cleanupTimer) {
+      clearInterval(cleanupTimer);
+      cleanupTimer = null;
+    }
     if (serverInstance) {
       serverInstance.close(() => {
         serverInstance = null;

@@ -221,7 +221,11 @@ export async function apiRequest<T = unknown>(
   try {
     rawBody = await res.text();
     console.log(`[qqbot-api] <<< Body:`, rawBody);
-    data = JSON.parse(rawBody) as T;
+    if (rawBody && rawBody.trim()) {
+      data = JSON.parse(rawBody) as T;
+    } else {
+      data = {} as T;
+    }
   } catch (err) {
     console.error(`[qqbot-api] <<< Parse error:`, err);
     throw new Error(`Failed to parse response [${path}]: ${err instanceof Error ? err.message : String(err)}`);
@@ -732,8 +736,14 @@ export function isBackgroundTokenRefreshRunning(): boolean {
  */
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    
+    let onAbort: (() => void) | undefined;
+    const timer = setTimeout(() => {
+      if (signal && onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      resolve();
+    }, ms);
+
     if (signal) {
       if (signal.aborted) {
         clearTimeout(timer);
@@ -741,7 +751,7 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
         return;
       }
       
-      const onAbort = () => {
+      onAbort = () => {
         clearTimeout(timer);
         reject(new Error("Aborted"));
       };

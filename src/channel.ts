@@ -229,7 +229,12 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     // 新增：登出账户（清除配置中的凭证）
     logoutAccount: async ({ accountId, cfg }) => {
       const nextCfg = { ...cfg } as OpenClawConfig;
-      const nextQQBot = cfg.channels?.qqbot ? { ...cfg.channels.qqbot } : undefined;
+      const nextQQBot = cfg.channels?.qqbot ? {
+        ...cfg.channels.qqbot,
+        accounts: (cfg.channels.qqbot as Record<string, unknown>).accounts
+          ? { ...(cfg.channels.qqbot as Record<string, unknown>).accounts as Record<string, unknown> }
+          : undefined,
+      } : undefined;
       let cleared = false;
       let changed = false;
 
@@ -242,8 +247,9 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         }
         const accounts = qqbot.accounts as Record<string, Record<string, unknown>> | undefined;
         if (accounts && accountId in accounts) {
-          const entry = accounts[accountId] as Record<string, unknown> | undefined;
-          if (entry && "clientSecret" in entry) {
+          const entry = { ...accounts[accountId] } as Record<string, unknown>;
+          accounts[accountId] = entry;
+          if ("clientSecret" in entry) {
             delete entry.clientSecret;
             cleared = true;
             changed = true;

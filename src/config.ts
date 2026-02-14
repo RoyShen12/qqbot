@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type { ResolvedQQBotAccount, QQBotAccountConfig } from "./types.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
@@ -91,8 +92,13 @@ export function resolveQQBotAccount(
     clientSecret = accountConfig.clientSecret;
     secretSource = "config";
   } else if (accountConfig.clientSecretFile) {
-    // 从文件读取（运行时处理）
-    secretSource = "file";
+    try {
+      clientSecret = fs.readFileSync(accountConfig.clientSecretFile, "utf-8").trim();
+      secretSource = "file";
+    } catch (err) {
+      console.error(`[qqbot-config] Failed to read clientSecretFile: ${accountConfig.clientSecretFile}`, err);
+      secretSource = "file";
+    }
   } else if (process.env.QQBOT_CLIENT_SECRET && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
     clientSecret = process.env.QQBOT_CLIENT_SECRET;
     secretSource = "env";
@@ -112,7 +118,7 @@ export function resolveQQBotAccount(
     secretSource,
     systemPrompt: accountConfig.systemPrompt,
     imageServerBaseUrl: accountConfig.imageServerBaseUrl || process.env.QQBOT_IMAGE_SERVER_BASE_URL,
-    markdownSupport: accountConfig.markdownSupport,
+    markdownSupport: accountConfig.markdownSupport ?? true,
     config: accountConfig,
   };
 }
