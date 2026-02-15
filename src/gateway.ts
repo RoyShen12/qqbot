@@ -6,11 +6,12 @@ import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, send
 import { loadSession, saveSession, clearSession, type SessionState } from "./session-store.js";
 import { recordKnownUser, flushKnownUsers } from "./known-users.js";
 import { getQQBotRuntime } from "./runtime.js";
-import { startImageServer, isImageServerRunning, downloadFile, type ImageServerConfig } from "./image-server.js";
+import { startImageServer, stopImageServer, isImageServerRunning, downloadFile, type ImageServerConfig } from "./image-server.js";
 import { getImageSize, formatQQBotMarkdownImage, hasQQBotImageSize, DEFAULT_IMAGE_SIZE } from "./utils/image-size.js";
 import { parseQQBotPayload, encodePayloadForCron, isCronReminderPayload, isMediaPayload, type CronReminderPayload, type MediaPayload } from "./utils/payload.js";
 import { isVoiceAttachment } from "./utils/audio-convert.js";
 import { generatePerMessagePrompt } from "./system-prompt.js";
+import { checkMessageReplyLimit, recordMessageReply } from "./outbound.js";
 
 // QQ Bot intents - 按权限级别分组
 const INTENTS = {
@@ -60,71 +61,6 @@ const IMAGE_SERVER_DIR = process.env.QQBOT_IMAGE_SERVER_DIR || path.join(process
 // 消息队列配置（异步处理，防止阻塞心跳）
 const MESSAGE_QUEUE_SIZE = 1000; // 最大队列长度
 const MESSAGE_QUEUE_WARN_THRESHOLD = 800; // 队列告警阈值
-
-// ============ 消息回复限流器 ============
-// 同一 message_id 1小时内最多回复 4 次，超过1小时需降级为主动消息
-const MESSAGE_REPLY_LIMIT = 4;
-const MESSAGE_REPLY_TTL = 60 * 60 * 1000; // 1小时
-
-interface MessageReplyRecord {
-  count: number;
-  firstReplyAt: number;
-}
-
-const messageReplyTracker = new Map<string, MessageReplyRecord>();
-
-/**
- * 检查是否可以回复该消息（限流检查）
- * @param messageId 消息ID
- * @returns { allowed: boolean, remaining: number } allowed=是否允许回复，remaining=剩余次数
- */
-function checkMessageReplyLimit(messageId: string): { allowed: boolean; remaining: number } {
-  const now = Date.now();
-  const record = messageReplyTracker.get(messageId);
-  
-  // 清理过期记录（定期清理，避免内存泄漏）
-  if (messageReplyTracker.size > 10000) {
-    for (const [id, rec] of messageReplyTracker) {
-      if (now - rec.firstReplyAt > MESSAGE_REPLY_TTL) {
-        messageReplyTracker.delete(id);
-      }
-    }
-  }
-  
-  if (!record) {
-    return { allowed: true, remaining: MESSAGE_REPLY_LIMIT };
-  }
-  
-  // 检查是否过期
-  if (now - record.firstReplyAt > MESSAGE_REPLY_TTL) {
-    messageReplyTracker.delete(messageId);
-    return { allowed: true, remaining: MESSAGE_REPLY_LIMIT };
-  }
-  
-  // 检查是否超过限制
-  const remaining = MESSAGE_REPLY_LIMIT - record.count;
-  return { allowed: remaining > 0, remaining: Math.max(0, remaining) };
-}
-
-/**
- * 记录一次消息回复
- * @param messageId 消息ID
- */
-function recordMessageReply(messageId: string): void {
-  const now = Date.now();
-  const record = messageReplyTracker.get(messageId);
-  
-  if (!record) {
-    messageReplyTracker.set(messageId, { count: 1, firstReplyAt: now });
-  } else {
-    // 检查是否过期，过期则重新计数
-    if (now - record.firstReplyAt > MESSAGE_REPLY_TTL) {
-      messageReplyTracker.set(messageId, { count: 1, firstReplyAt: now });
-    } else {
-      record.count++;
-    }
-  }
-}
 
 // ============ QQ 表情标签解析 ============
 
@@ -244,7 +180,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   }
 
   // 初始化 API 配置（markdown 支持）
-  initApiConfig({
+  initApiConfig(account.appId, {
     markdownSupport: account.markdownSupport,
   });
   log?.info(`[qqbot:${account.accountId}] API config: markdownSupport=${account.markdownSupport === true}`);
@@ -355,7 +291,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     }
     cleanup();
     // P1-1: 停止后台 Token 刷新
-    stopBackgroundTokenRefresh();
+    stopBackgroundTokenRefresh(account.appId);
+    // 关闭图床服务器
+    stopImageServer();
     // P1-3: 保存已知用户数据
     flushKnownUsers();
   });
@@ -428,7 +366,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
       // 如果标记了需要刷新 token，则清除缓存
       if (shouldRefreshToken) {
         log?.info(`[qqbot:${account.accountId}] Refreshing token...`);
-        clearTokenCache();
+        clearTokenCache(account.appId);
         shouldRefreshToken = false;
       }
       
@@ -701,7 +639,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             // 如果是 token 相关错误，清除缓存重试一次
             if (errMsg.includes("401") || errMsg.includes("token") || errMsg.includes("access_token")) {
               log?.info(`[qqbot:${account.accountId}] Token may be expired, refreshing...`);
-              clearTokenCache();
+              clearTokenCache(account.appId);
               const newToken = await getAccessToken(account.appId, account.clientSecret);
               await sendFn(newToken);
             } else {
@@ -715,9 +653,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           try {
             await sendWithTokenRetry(async (token) => {
               if (event.type === "c2c") {
-                await sendC2CMessage(token, event.senderId, errorText, event.messageId);
+                await sendC2CMessage(account.appId, token, event.senderId, errorText, event.messageId);
               } else if (event.type === "group" && event.groupOpenid) {
-                await sendGroupMessage(token, event.groupOpenid, errorText, event.messageId);
+                await sendGroupMessage(account.appId, token, event.groupOpenid, errorText, event.messageId);
               } else if (event.channelId) {
                 await sendChannelMessage(token, event.channelId, errorText, event.messageId);
               }
@@ -763,6 +701,12 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
                 log?.info(`[qqbot:${account.accountId}] deliver called, kind: ${info.kind}, payload keys: ${Object.keys(payload).join(", ")}`);
 
+                // 消息回复限流检查（同一 message_id 1小时内最多回复 4 次）
+                const replyLimit = checkMessageReplyLimit(event.messageId);
+                if (!replyLimit.allowed) {
+                  log?.info(`[qqbot:${account.accountId}] Reply rate limited for message ${event.messageId}: ${replyLimit.message}`);
+                  return;
+                }
                 let replyText = payload.text ?? "";
 
                 // 提取 [[reply_to: xxx]] 标记用于消息引用
@@ -827,9 +771,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                       try {
                         await sendWithTokenRetry(async (token) => {
                           if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, item.content, event.messageId, itemRef);
+                            await sendC2CMessage(account.appId, token, event.senderId, item.content, event.messageId, itemRef);
                           } else if (event.type === "group" && event.groupOpenid) {
-                            await sendGroupMessage(token, event.groupOpenid, item.content, event.messageId, itemRef);
+                            await sendGroupMessage(account.appId, token, event.groupOpenid, item.content, event.messageId, itemRef);
                           } else if (event.channelId) {
                             await sendChannelMessage(token, event.channelId, item.content, event.messageId, itemRef);
                           }
@@ -909,6 +853,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   }
                   
                   // 记录活动并返回
+                  recordMessageReply(event.messageId);
                   pluginRuntime.channel.activity.record({
                     channel: "qqbot",
                     accountId: account.accountId,
@@ -916,7 +861,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   });
                   return;
                 }
-                
+
                 // ============ 结构化载荷检测与分发 ============
                 // 优先检测 QQBOT_PAYLOAD: 前缀，如果是结构化载荷则分发到对应处理器
                 const payloadResult = parseQQBotPayload(replyText);
@@ -946,9 +891,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                       try {
                         await sendWithTokenRetry(async (token) => {
                           if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, confirmText, event.messageId, messageReference);
+                            await sendC2CMessage(account.appId, token, event.senderId, confirmText, event.messageId, messageReference);
                           } else if (event.type === "group" && event.groupOpenid) {
-                            await sendGroupMessage(token, event.groupOpenid, confirmText, event.messageId, messageReference);
+                            await sendGroupMessage(account.appId, token, event.groupOpenid, confirmText, event.messageId, messageReference);
                           } else if (event.channelId) {
                             await sendChannelMessage(token, event.channelId, confirmText, event.messageId, messageReference);
                           }
@@ -959,6 +904,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                       }
                       
                       // 记录活动并返回（cron add 命令需要由 AI 执行，这里只处理载荷）
+                      recordMessageReply(event.messageId);
                       pluginRuntime.channel.activity.record({
                         channel: "qqbot",
                         accountId: account.accountId,
@@ -1025,9 +971,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                           if (parsedPayload.caption) {
                             await sendWithTokenRetry(async (token) => {
                               if (event.type === "c2c") {
-                                await sendC2CMessage(token, event.senderId, parsedPayload.caption!, event.messageId, messageReference);
+                                await sendC2CMessage(account.appId, token, event.senderId, parsedPayload.caption!, event.messageId, messageReference);
                               } else if (event.type === "group" && event.groupOpenid) {
-                                await sendGroupMessage(token, event.groupOpenid, parsedPayload.caption!, event.messageId, messageReference);
+                                await sendGroupMessage(account.appId, token, event.groupOpenid, parsedPayload.caption!, event.messageId, messageReference);
                               } else if (event.channelId) {
                                 await sendChannelMessage(token, event.channelId, parsedPayload.caption!, event.messageId, messageReference);
                               }
@@ -1051,6 +997,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                       }
                       
                       // 记录活动并返回
+                      recordMessageReply(event.messageId);
                       pluginRuntime.channel.activity.record({
                         channel: "qqbot",
                         accountId: account.accountId,
@@ -1261,9 +1208,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     try {
                       await sendWithTokenRetry(async (token) => {
                         if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId, messageReference);
+                          await sendC2CMessage(account.appId, token, event.senderId, textWithoutImages, event.messageId, messageReference);
                         } else if (event.type === "group" && event.groupOpenid) {
-                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId, messageReference);
+                          await sendGroupMessage(account.appId, token, event.groupOpenid, textWithoutImages, event.messageId, messageReference);
                         } else if (event.channelId) {
                           await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId, messageReference);
                         }
@@ -1307,9 +1254,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     if (textWithoutImages.trim()) {
                       await sendWithTokenRetry(async (token) => {
                         if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId, messageReference);
+                          await sendC2CMessage(account.appId, token, event.senderId, textWithoutImages, event.messageId, messageReference);
                         } else if (event.type === "group" && event.groupOpenid) {
-                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId, messageReference);
+                          await sendGroupMessage(account.appId, token, event.groupOpenid, textWithoutImages, event.messageId, messageReference);
                         } else if (event.channelId) {
                           await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId, messageReference);
                         }
@@ -1321,6 +1268,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   }
                 }
 
+                recordMessageReply(event.messageId);
                 pluginRuntime.channel.activity.record({
                   channel: "qqbot",
                   accountId: account.accountId,

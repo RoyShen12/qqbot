@@ -1,61 +1,71 @@
 /**
  * QQ Bot API 鉴权和请求封装
+ *
+ * 所有运行时状态（Token 缓存、Markdown 支持、后台刷新）均按 appId 隔离，
+ * 支持多账户并发运行互不干扰。
  */
 
 const API_BASE = "https://api.sgroup.qq.com";
 const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken";
 
-// 运行时配置
-let currentMarkdownSupport = false;
+// ============ 按 appId 隔离的运行时状态 ============
+
+// Markdown 支持配置 (per appId)
+const markdownSupportMap = new Map<string, boolean>();
 
 /**
  * 初始化 API 配置
+ * @param appId - 应用 ID，用于隔离多账户配置
  * @param options.markdownSupport - 是否支持 markdown 消息（默认 false，需要机器人具备该权限才能启用）
  */
-export function initApiConfig(options: { markdownSupport?: boolean }): void {
-  currentMarkdownSupport = options.markdownSupport === true; // 默认为 false，需要机器人具备 markdown 消息权限才能启用
+export function initApiConfig(appId: string, options: { markdownSupport?: boolean }): void {
+  markdownSupportMap.set(appId, options.markdownSupport === true);
 }
 
 /**
- * 获取当前是否支持 markdown
+ * 获取指定账户是否支持 markdown
  */
-export function isMarkdownSupport(): boolean {
-  return currentMarkdownSupport;
+export function isMarkdownSupport(appId: string): boolean {
+  return markdownSupportMap.get(appId) ?? false;
 }
 
-let cachedToken: { token: string; expiresAt: number } | null = null;
-// Singleflight: 防止并发获取 Token 的 Promise 缓存
-let tokenFetchPromise: Promise<string> | null = null;
+// Token 缓存 (per appId)
+const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+// Singleflight Promise 缓存 (per appId)
+const tokenFetchPromises = new Map<string, Promise<string>>();
 
 /**
  * 获取 AccessToken（带缓存 + singleflight 并发安全）
- * 
+ *
  * 使用 singleflight 模式：当多个请求同时发现 Token 过期时，
  * 只有第一个请求会真正去获取新 Token，其他请求复用同一个 Promise。
  */
 export async function getAccessToken(appId: string, clientSecret: string): Promise<string> {
   // 检查缓存，提前 5 分钟刷新
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 5 * 60 * 1000) {
-    return cachedToken.token;
+  const cached = tokenCache.get(appId);
+  if (cached && Date.now() < cached.expiresAt - 5 * 60 * 1000) {
+    return cached.token;
   }
 
   // Singleflight: 如果已有进行中的 Token 获取请求，复用它
-  if (tokenFetchPromise) {
-    console.log(`[qqbot-api] Token fetch in progress, waiting for existing request...`);
-    return tokenFetchPromise;
+  const existingPromise = tokenFetchPromises.get(appId);
+  if (existingPromise) {
+    console.log(`[qqbot-api] Token fetch in progress for ${appId}, waiting for existing request...`);
+    return existingPromise;
   }
 
   // 创建新的 Token 获取 Promise（singleflight 入口）
-  tokenFetchPromise = (async () => {
+  const promise = (async () => {
     try {
       return await doFetchToken(appId, clientSecret);
     } finally {
       // 无论成功失败，都清除 Promise 缓存
-      tokenFetchPromise = null;
+      tokenFetchPromises.delete(appId);
     }
   })();
 
-  return tokenFetchPromise;
+  tokenFetchPromises.set(appId, promise);
+  return promise;
 }
 
 /**
@@ -65,7 +75,7 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
 
   const requestBody = { appId, clientSecret };
   const requestHeaders = { "Content-Type": "application/json" };
-  
+
   // 打印请求信息（隐藏敏感信息）
   console.log(`[qqbot-api] >>> POST ${TOKEN_URL}`);
   console.log(`[qqbot-api] >>> Headers:`, JSON.stringify(requestHeaders, null, 2));
@@ -108,36 +118,38 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
     throw new Error(`Failed to get access_token: ${JSON.stringify(data)}`);
   }
 
-  cachedToken = {
+  tokenCache.set(appId, {
     token: data.access_token,
     expiresAt: Date.now() + (data.expires_in ?? 7200) * 1000,
-  };
+  });
 
-  console.log(`[qqbot-api] Token cached, expires at: ${new Date(cachedToken.expiresAt).toISOString()}`);
-  return cachedToken.token;
+  const cachedEntry = tokenCache.get(appId)!;
+  console.log(`[qqbot-api] Token cached for ${appId}, expires at: ${new Date(cachedEntry.expiresAt).toISOString()}`);
+  return cachedEntry.token;
 }
 
 /**
- * 清除 Token 缓存
+ * 清除指定账户的 Token 缓存
  */
-export function clearTokenCache(): void {
-  cachedToken = null;
-  // 注意：不清除 tokenFetchPromise，让进行中的请求完成
+export function clearTokenCache(appId: string): void {
+  tokenCache.delete(appId);
+  // 注意：不清除 tokenFetchPromises，让进行中的请求完成
   // 下次调用 getAccessToken 时会自动获取新 Token
 }
 
 /**
- * 获取 Token 缓存状态（用于监控）
+ * 获取指定账户的 Token 缓存状态（用于监控）
  */
-export function getTokenStatus(): { status: "valid" | "expired" | "refreshing" | "none"; expiresAt: number | null } {
-  if (tokenFetchPromise) {
-    return { status: "refreshing", expiresAt: cachedToken?.expiresAt ?? null };
+export function getTokenStatus(appId: string): { status: "valid" | "expired" | "refreshing" | "none"; expiresAt: number | null } {
+  if (tokenFetchPromises.has(appId)) {
+    return { status: "refreshing", expiresAt: tokenCache.get(appId)?.expiresAt ?? null };
   }
-  if (!cachedToken) {
+  const cached = tokenCache.get(appId);
+  if (!cached) {
     return { status: "none", expiresAt: null };
   }
-  const isValid = Date.now() < cachedToken.expiresAt - 5 * 60 * 1000;
-  return { status: isValid ? "valid" : "expired", expiresAt: cachedToken.expiresAt };
+  const isValid = Date.now() < cached.expiresAt - 5 * 60 * 1000;
+  return { status: isValid ? "valid" : "expired", expiresAt: cached.expiresAt };
 }
 
 /**
@@ -156,7 +168,7 @@ export function getNextMsgSeq(msgId: string): number {
   const current = msgSeqTracker.get(msgId) ?? 0;
   const next = current + 1;
   msgSeqTracker.set(msgId, next);
-  
+
   // 清理过期的序号
   // 简单策略：保留最近 1000 条
   if (msgSeqTracker.size > 1000) {
@@ -165,7 +177,7 @@ export function getNextMsgSeq(msgId: string): number {
       msgSeqTracker.delete(keys[i]);
     }
   }
-  
+
   // 结合时间戳基础值，确保唯一性
   return seqBaseTime + next;
 }
@@ -280,17 +292,19 @@ export interface MessageResponse {
 
 /**
  * 构建消息体
- * 根据 markdownSupport 配置决定消息格式：
+ * 根据 appId 对应的 markdownSupport 配置决定消息格式：
  * - markdown 模式: { markdown: { content }, msg_type: 2 }
  * - 纯文本模式: { content, msg_type: 0 }
  */
 function buildMessageBody(
+  appId: string,
   content: string,
   msgId: string | undefined,
   msgSeq: number,
   messageReference?: string
 ): Record<string, unknown> {
-  const body: Record<string, unknown> = currentMarkdownSupport
+  const useMarkdown = markdownSupportMap.get(appId) ?? false;
+  const body: Record<string, unknown> = useMarkdown
     ? {
         markdown: { content },
         msg_type: 2,
@@ -320,6 +334,7 @@ function buildMessageBody(
  * 发送 C2C 单聊消息
  */
 export async function sendC2CMessage(
+  appId: string,
   accessToken: string,
   openid: string,
   content: string,
@@ -327,7 +342,7 @@ export async function sendC2CMessage(
   messageReference?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(content, msgId, msgSeq, messageReference);
+  const body = buildMessageBody(appId, content, msgId, msgSeq, messageReference);
 
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
 }
@@ -351,7 +366,7 @@ export async function sendC2CInputNotify(
     msg_seq: msgSeq,
     ...(msgId ? { msg_id: msgId } : {}),
   };
-  
+
   await apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
 }
 
@@ -381,6 +396,7 @@ export async function sendChannelMessage(
  * 发送群聊消息
  */
 export async function sendGroupMessage(
+  appId: string,
   accessToken: string,
   groupOpenid: string,
   content: string,
@@ -388,26 +404,28 @@ export async function sendGroupMessage(
   messageReference?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(content, msgId, msgSeq, messageReference);
+  const body = buildMessageBody(appId, content, msgId, msgSeq, messageReference);
 
   return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body);
 }
 
 /**
  * 构建主动消息请求体
- * 根据 markdownSupport 配置决定消息格式：
+ * 根据 appId 对应的 markdownSupport 配置决定消息格式：
  * - markdown 模式: { markdown: { content }, msg_type: 2 }
  * - 纯文本模式: { content, msg_type: 0 }
- * 
+ *
  * 注意：主动消息不支持流式发送
  */
-function buildProactiveMessageBody(content: string): Record<string, unknown> {
+function buildProactiveMessageBody(appId: string, content: string): Record<string, unknown> {
   // 主动消息内容校验（参考 Telegram 机制）
   if (!content || content.trim().length === 0) {
     throw new Error("主动消息内容不能为空 (markdown.content is empty)");
   }
 
-  if (currentMarkdownSupport) {
+  const useMarkdown = markdownSupportMap.get(appId) ?? false;
+
+  if (useMarkdown) {
     return {
       markdown: { content },
       msg_type: 2,
@@ -422,34 +440,36 @@ function buildProactiveMessageBody(content: string): Record<string, unknown> {
 
 /**
  * 主动发送 C2C 单聊消息（不需要 msg_id，每月限 4 条/用户）
- * 
+ *
  * 注意：
  * 1. 内容不能为空（对应 markdown.content 字段）
  * 2. 不支持流式发送
  */
 export async function sendProactiveC2CMessage(
+  appId: string,
   accessToken: string,
   openid: string,
   content: string
 ): Promise<{ id: string; timestamp: number }> {
-  const body = buildProactiveMessageBody(content);
+  const body = buildProactiveMessageBody(appId, content);
   console.log(`[qqbot-api] sendProactiveC2CMessage: openid=${openid}, msg_type=${body.msg_type}, content_len=${content.length}`);
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
 }
 
 /**
  * 主动发送群聊消息（不需要 msg_id，每月限 4 条/群）
- * 
+ *
  * 注意：
  * 1. 内容不能为空（对应 markdown.content 字段）
  * 2. 不支持流式发送
  */
 export async function sendProactiveGroupMessage(
+  appId: string,
   accessToken: string,
   groupOpenid: string,
   content: string
 ): Promise<{ id: string; timestamp: string }> {
-  const body = buildProactiveMessageBody(content);
+  const body = buildProactiveMessageBody(appId, content);
   console.log(`[qqbot-api] sendProactiveGroupMessage: group=${groupOpenid}, msg_type=${body.msg_type}, content_len=${content.length}`);
   return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body);
 }
@@ -492,18 +512,18 @@ export async function uploadC2CMedia(
   if (!url && !fileData) {
     throw new Error("uploadC2CMedia: url or fileData is required");
   }
-  
+
   const body: Record<string, unknown> = {
     file_type: fileType,
     srv_send_msg: srvSendMsg,
   };
-  
+
   if (url) {
     body.url = url;
   } else if (fileData) {
     body.file_data = fileData;
   }
-  
+
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/files`, body);
 }
 
@@ -523,18 +543,18 @@ export async function uploadGroupMedia(
   if (!url && !fileData) {
     throw new Error("uploadGroupMedia: url or fileData is required");
   }
-  
+
   const body: Record<string, unknown> = {
     file_type: fileType,
     srv_send_msg: srvSendMsg,
   };
-  
+
   if (url) {
     body.url = url;
   } else if (fileData) {
     body.file_data = fileData;
   }
-  
+
   return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/files`, body);
 }
 
@@ -592,7 +612,7 @@ export async function sendC2CImageMessage(
   content?: string
 ): Promise<{ id: string; timestamp: number }> {
   let uploadResult: UploadMediaResponse;
-  
+
   // 检查是否是 Base64 Data URL
   if (imageUrl.startsWith("data:")) {
     // 解析 Base64 Data URL: data:image/png;base64,xxxxx
@@ -607,7 +627,7 @@ export async function sendC2CImageMessage(
     // 公网 URL，使用 url 参数上传
     uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.IMAGE, imageUrl, undefined, false);
   }
-  
+
   // 发送富媒体消息
   return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
 }
@@ -626,7 +646,7 @@ export async function sendGroupImageMessage(
   content?: string
 ): Promise<{ id: string; timestamp: string }> {
   let uploadResult: UploadMediaResponse;
-  
+
   // 检查是否是 Base64 Data URL
   if (imageUrl.startsWith("data:")) {
     // 解析 Base64 Data URL: data:image/png;base64,xxxxx
@@ -641,12 +661,12 @@ export async function sendGroupImageMessage(
     // 公网 URL，使用 url 参数上传
     uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.IMAGE, imageUrl, undefined, false);
   }
-  
+
   // 发送富媒体消息
   return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
 }
 
-// ============ 后台 Token 刷新 (P1-1) ============
+// ============ 后台 Token 刷新 ============
 
 /**
  * 后台 Token 刷新配置
@@ -668,14 +688,16 @@ interface BackgroundTokenRefreshOptions {
   };
 }
 
-// 后台刷新状态
-let backgroundRefreshRunning = false;
-let backgroundRefreshAbortController: AbortController | null = null;
+// 后台刷新状态 (per appId)
+const backgroundRefreshState = new Map<string, {
+  running: boolean;
+  abortController: AbortController | null;
+}>();
 
 /**
  * 启动后台 Token 刷新
  * 在后台定时刷新 Token，避免请求时才发现过期
- * 
+ *
  * @param appId 应用 ID
  * @param clientSecret 应用密钥
  * @param options 配置选项
@@ -685,8 +707,9 @@ export function startBackgroundTokenRefresh(
   clientSecret: string,
   options?: BackgroundTokenRefreshOptions
 ): void {
-  if (backgroundRefreshRunning) {
-    console.log("[qqbot-api] Background token refresh already running");
+  const state = backgroundRefreshState.get(appId);
+  if (state?.running) {
+    console.log(`[qqbot-api] Background token refresh already running for ${appId}`);
     return;
   }
 
@@ -698,12 +721,12 @@ export function startBackgroundTokenRefresh(
     log,
   } = options ?? {};
 
-  backgroundRefreshRunning = true;
-  backgroundRefreshAbortController = new AbortController();
-  const signal = backgroundRefreshAbortController.signal;
+  const abortController = new AbortController();
+  const signal = abortController.signal;
+  backgroundRefreshState.set(appId, { running: true, abortController });
 
   const refreshLoop = async () => {
-    log?.info?.("[qqbot-api] Background token refresh started");
+    log?.info?.(`[qqbot-api] Background token refresh started for ${appId}`);
 
     while (!signal.aborted) {
       try {
@@ -711,8 +734,9 @@ export function startBackgroundTokenRefresh(
         await getAccessToken(appId, clientSecret);
 
         // 计算下次刷新时间
-        if (cachedToken) {
-          const expiresIn = cachedToken.expiresAt - Date.now();
+        const cachedEntry = tokenCache.get(appId);
+        if (cachedEntry) {
+          const expiresIn = cachedEntry.expiresAt - Date.now();
           // 提前刷新时间 + 随机偏移（避免集群同时刷新）
           const randomOffset = Math.random() * randomOffsetMs;
           const refreshIn = Math.max(
@@ -721,52 +745,62 @@ export function startBackgroundTokenRefresh(
           );
 
           log?.debug?.(
-            `[qqbot-api] Token valid, next refresh in ${Math.round(refreshIn / 1000)}s`
+            `[qqbot-api] Token valid for ${appId}, next refresh in ${Math.round(refreshIn / 1000)}s`
           );
 
           // 等待到刷新时间
           await sleep(refreshIn, signal);
         } else {
           // 没有缓存的 Token，等待一段时间后重试
-          log?.debug?.("[qqbot-api] No cached token, retrying soon");
+          log?.debug?.(`[qqbot-api] No cached token for ${appId}, retrying soon`);
           await sleep(minRefreshIntervalMs, signal);
         }
       } catch (err) {
         if (signal.aborted) break;
-        
+
         // 刷新失败，等待后重试
-        log?.error?.(`[qqbot-api] Background token refresh failed: ${err}`);
+        log?.error?.(`[qqbot-api] Background token refresh failed for ${appId}: ${err}`);
         await sleep(retryDelayMs, signal);
       }
     }
 
-    backgroundRefreshRunning = false;
-    log?.info?.("[qqbot-api] Background token refresh stopped");
+    const currentState = backgroundRefreshState.get(appId);
+    if (currentState) {
+      currentState.running = false;
+    }
+    log?.info?.(`[qqbot-api] Background token refresh stopped for ${appId}`);
   };
 
   // 异步启动，不阻塞调用者
   refreshLoop().catch((err) => {
-    backgroundRefreshRunning = false;
-    log?.error?.(`[qqbot-api] Background token refresh crashed: ${err}`);
+    const currentState = backgroundRefreshState.get(appId);
+    if (currentState) {
+      currentState.running = false;
+    }
+    log?.error?.(`[qqbot-api] Background token refresh crashed for ${appId}: ${err}`);
   });
 }
 
 /**
- * 停止后台 Token 刷新
+ * 停止指定账户的后台 Token 刷新
  */
-export function stopBackgroundTokenRefresh(): void {
-  if (backgroundRefreshAbortController) {
-    backgroundRefreshAbortController.abort();
-    backgroundRefreshAbortController = null;
+export function stopBackgroundTokenRefresh(appId: string): void {
+  const state = backgroundRefreshState.get(appId);
+  if (state?.abortController) {
+    state.abortController.abort();
+    state.abortController = null;
   }
-  backgroundRefreshRunning = false;
+  if (state) {
+    state.running = false;
+  }
+  backgroundRefreshState.delete(appId);
 }
 
 /**
- * 检查后台 Token 刷新是否正在运行
+ * 检查指定账户的后台 Token 刷新是否正在运行
  */
-export function isBackgroundTokenRefreshRunning(): boolean {
-  return backgroundRefreshRunning;
+export function isBackgroundTokenRefreshRunning(appId: string): boolean {
+  return backgroundRefreshState.get(appId)?.running ?? false;
 }
 
 /**
@@ -788,12 +822,12 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
         reject(new Error("Aborted"));
         return;
       }
-      
+
       onAbort = () => {
         clearTimeout(timer);
         reject(new Error("Aborted"));
       };
-      
+
       signal.addEventListener("abort", onAbort, { once: true });
     }
   });

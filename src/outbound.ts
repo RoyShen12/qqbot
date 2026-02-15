@@ -258,10 +258,10 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
     // 如果没有 replyToId，使用主动发送接口
     if (!replyToId) {
       if (target.type === "c2c") {
-        const result = await sendProactiveC2CMessage(accessToken, target.id, text);
+        const result = await sendProactiveC2CMessage(account.appId, accessToken, target.id, text);
         return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
       } else if (target.type === "group") {
-        const result = await sendProactiveGroupMessage(accessToken, target.id, text);
+        const result = await sendProactiveGroupMessage(account.appId, accessToken, target.id, text);
         return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
       } else {
         // 频道暂不支持主动消息
@@ -272,12 +272,12 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
 
     // 有 replyToId，使用被动回复接口
     if (target.type === "c2c") {
-      const result = await sendC2CMessage(accessToken, target.id, text, replyToId, ctx.messageReference ?? undefined);
+      const result = await sendC2CMessage(account.appId, accessToken, target.id, text, replyToId, ctx.messageReference ?? undefined);
       // 记录回复次数
       recordMessageReply(replyToId);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     } else if (target.type === "group") {
-      const result = await sendGroupMessage(accessToken, target.id, text, replyToId, ctx.messageReference ?? undefined);
+      const result = await sendGroupMessage(account.appId, accessToken, target.id, text, replyToId, ctx.messageReference ?? undefined);
       // 记录回复次数
       recordMessageReply(replyToId);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
@@ -314,10 +314,10 @@ export async function sendProactiveMessage(
     const target = parseTarget(to);
 
     if (target.type === "c2c") {
-      const result = await sendProactiveC2CMessage(accessToken, target.id, text);
+      const result = await sendProactiveC2CMessage(account.appId, accessToken, target.id, text);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     } else if (target.type === "group") {
-      const result = await sendProactiveGroupMessage(accessToken, target.id, text);
+      const result = await sendProactiveGroupMessage(account.appId, accessToken, target.id, text);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     } else {
       // 频道暂不支持主动消息，使用普通发送
@@ -511,9 +511,9 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
     if (text?.trim()) {
       try {
         if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
+          await sendC2CMessage(account.appId, accessToken, target.id, text, replyToId ?? undefined);
         } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
+          await sendGroupMessage(account.appId, accessToken, target.id, text, replyToId ?? undefined);
         }
       } catch (textErr) {
         // 文本发送失败不影响整体结果，图片已发送成功

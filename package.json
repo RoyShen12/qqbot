@@ -42,7 +42,6 @@
     "ws": "^8.18.0"
   },
   "bundledDependencies": [
-    "silk-wasm",
     "ws"
   ],
   "devDependencies": {
@@ -55,8 +54,5 @@
     "moltbot": "*",
     "openclaw": "*"
   },
-  "homepage": "https://github.com/sliverp/qqbot",
-  "bundleDependencies": [
-    "ws"
-  ]
+  "homepage": "https://github.com/sliverp/qqbot"
 }
