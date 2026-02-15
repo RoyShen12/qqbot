@@ -287,7 +287,8 @@ export interface MessageResponse {
 function buildMessageBody(
   content: string,
   msgId: string | undefined,
-  msgSeq: number
+  msgSeq: number,
+  messageReference?: string
 ): Record<string, unknown> {
   const body: Record<string, unknown> = currentMarkdownSupport
     ? {
@@ -305,6 +306,13 @@ function buildMessageBody(
     body.msg_id = msgId;
   }
 
+  if (messageReference) {
+    body.message_reference = {
+      message_id: messageReference,
+      ignore_get_message_error: true,
+    };
+  }
+
   return body;
 }
 
@@ -315,11 +323,12 @@ export async function sendC2CMessage(
   accessToken: string,
   openid: string,
   content: string,
-  msgId?: string
+  msgId?: string,
+  messageReference?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(content, msgId, msgSeq);
-  
+  const body = buildMessageBody(content, msgId, msgSeq, messageReference);
+
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
 }
 
@@ -353,11 +362,18 @@ export async function sendChannelMessage(
   accessToken: string,
   channelId: string,
   content: string,
-  msgId?: string
+  msgId?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: string }> {
   return apiRequest(accessToken, "POST", `/channels/${channelId}/messages`, {
     content,
     ...(msgId ? { msg_id: msgId } : {}),
+    ...(messageReference ? {
+      message_reference: {
+        message_id: messageReference,
+        ignore_get_message_error: true,
+      },
+    } : {}),
   });
 }
 
@@ -368,11 +384,12 @@ export async function sendGroupMessage(
   accessToken: string,
   groupOpenid: string,
   content: string,
-  msgId?: string
+  msgId?: string,
+  messageReference?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(content, msgId, msgSeq);
-  
+  const body = buildMessageBody(content, msgId, msgSeq, messageReference);
+
   return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body);
 }
 

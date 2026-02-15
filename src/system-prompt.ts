@@ -4,6 +4,7 @@ export interface MessageContext {
   messageId: string;
   isGroupChat: boolean;
   groupOpenid?: string;
+  referencedMessageId?: string;
 }
 
 export function generatePerMessagePrompt(ctx: MessageContext): string {
@@ -18,6 +19,10 @@ export function generatePerMessagePrompt(ctx: MessageContext): string {
 
   if (ctx.isGroupChat && ctx.groupOpenid) {
     prompt += `\n群组ID: ${ctx.groupOpenid}`;
+  }
+
+  if (ctx.referencedMessageId) {
+    prompt += `\n引用消息ID: ${ctx.referencedMessageId}`;
   }
 
   prompt += `\n你可以设置定时提醒(qqbot-cron)和发送图片(qqbot-media)，详见 available_skills。`;

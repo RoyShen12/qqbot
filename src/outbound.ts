@@ -150,6 +150,7 @@ export interface OutboundContext {
   accountId?: string | null;
   replyToId?: string | null;
   account: ResolvedQQBotAccount;
+  messageReference?: string | null;
 }
 
 export interface MediaOutboundContext extends OutboundContext {
@@ -271,17 +272,17 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
 
     // 有 replyToId，使用被动回复接口
     if (target.type === "c2c") {
-      const result = await sendC2CMessage(accessToken, target.id, text, replyToId);
+      const result = await sendC2CMessage(accessToken, target.id, text, replyToId, ctx.messageReference ?? undefined);
       // 记录回复次数
       recordMessageReply(replyToId);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     } else if (target.type === "group") {
-      const result = await sendGroupMessage(accessToken, target.id, text, replyToId);
+      const result = await sendGroupMessage(accessToken, target.id, text, replyToId, ctx.messageReference ?? undefined);
       // 记录回复次数
       recordMessageReply(replyToId);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     } else {
-      const result = await sendChannelMessage(accessToken, target.id, text, replyToId);
+      const result = await sendChannelMessage(accessToken, target.id, text, replyToId, ctx.messageReference ?? undefined);
       // 记录回复次数
       recordMessageReply(replyToId);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };

@@ -152,20 +152,29 @@ function parseFaceTags(text: string): string {
 // ============ 内部标记过滤 ============
 
 /**
- * 过滤内部标记（如 [[reply_to: xxx]]）
- * 这些标记可能被 AI 错误地学习并输出，需要在发送前移除
+ * 提取并过滤内部标记（如 [[reply_to: xxx]]）
+ * 提取 reply_to 标记供消息引用使用，并过滤所有内部标记
  */
-function filterInternalMarkers(text: string): string {
-  if (!text) return text;
-  
-  // 过滤 [[xxx: yyy]] 格式的内部标记
-  // 例如: [[reply_to: ROBOT1.0_kbc...]]
+function extractAndFilterInternalMarkers(text: string): {
+  text: string;
+  replyTo?: string;
+} {
+  if (!text) return { text };
+
+  let replyTo: string | undefined;
+  // 提取 [[reply_to: xxx]]
+  const replyMatch = text.match(/\[\[reply_to:\s*([^\]]+)\]\]/i);
+  if (replyMatch) {
+    replyTo = replyMatch[1].trim();
+  }
+
+  // 过滤所有 [[xxx: yyy]] 格式的内部标记
   let result = text.replace(/\[\[[a-z_]+:\s*[^\]]*\]\]/gi, "");
-  
+
   // 清理可能产生的多余空行
   result = result.replace(/\n{3,}/g, "\n\n").trim();
-  
-  return result;
+
+  return { text: result, replyTo };
 }
 
 export interface GatewayContext {
@@ -195,6 +204,7 @@ interface QueuedMessage {
   guildId?: string;
   groupOpenid?: string;
   attachments?: Array<{ content_type: string; url: string; filename?: string }>;
+  referencedMessageId?: string;
 }
 
 /**
@@ -444,6 +454,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         guildId?: string;
         groupOpenid?: string;
         attachments?: Array<{ content_type: string; url: string; filename?: string }>;
+        referencedMessageId?: string;
       }) => {
 
         log?.debug?.(`[qqbot:${account.accountId}] Received message: ${JSON.stringify(event)}`);
@@ -494,6 +505,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           messageId: event.messageId,
           isGroupChat,
           groupOpenid: event.groupOpenid,
+          referencedMessageId: event.referencedMessageId,
         });
         
         // 处理附件（图片等）- 下载到本地供 clawdbot 访问
@@ -752,6 +764,14 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 log?.info(`[qqbot:${account.accountId}] deliver called, kind: ${info.kind}, payload keys: ${Object.keys(payload).join(", ")}`);
 
                 let replyText = payload.text ?? "";
+
+                // 提取 [[reply_to: xxx]] 标记用于消息引用
+                let messageReference: string | undefined;
+                const replyToMatch = replyText.match(/\[\[reply_to:\s*([^\]]+)\]\]/i);
+                if (replyToMatch) {
+                  const refValue = replyToMatch[1].trim();
+                  messageReference = refValue === "current" ? event.messageId : refValue;
+                }
                 
                 // ============ 简单图片标签解析 ============
                 // 支持 <qqimg>路径</qqimg> 或 <qqimg>路径</img> 格式发送图片
@@ -777,7 +797,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     // 添加标签前的文本
                     const textBefore = replyText.slice(lastIndex, match.index).replace(/\n{3,}/g, "\n\n").trim();
                     if (textBefore) {
-                      sendQueue.push({ type: "text", content: filterInternalMarkers(textBefore) });
+                      sendQueue.push({ type: "text", content: extractAndFilterInternalMarkers(textBefore).text });
                     }
                     
                     // 添加图片
@@ -793,25 +813,28 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   // 添加最后一个标签后的文本
                   const textAfter = replyText.slice(lastIndex).replace(/\n{3,}/g, "\n\n").trim();
                   if (textAfter) {
-                    sendQueue.push({ type: "text", content: filterInternalMarkers(textAfter) });
+                    sendQueue.push({ type: "text", content: extractAndFilterInternalMarkers(textAfter).text });
                   }
                   
                   log?.info(`[qqbot:${account.accountId}] Send queue: ${sendQueue.map(item => item.type).join(" -> ")}`);
                   
                   // 按顺序发送
+                  let qqimgFirstSent = false;
                   for (const item of sendQueue) {
+                    const itemRef = !qqimgFirstSent ? messageReference : undefined;
                     if (item.type === "text") {
                       // 发送文本
                       try {
                         await sendWithTokenRetry(async (token) => {
                           if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, item.content, event.messageId);
+                            await sendC2CMessage(token, event.senderId, item.content, event.messageId, itemRef);
                           } else if (event.type === "group" && event.groupOpenid) {
-                            await sendGroupMessage(token, event.groupOpenid, item.content, event.messageId);
+                            await sendGroupMessage(token, event.groupOpenid, item.content, event.messageId, itemRef);
                           } else if (event.channelId) {
-                            await sendChannelMessage(token, event.channelId, item.content, event.messageId);
+                            await sendChannelMessage(token, event.channelId, item.content, event.messageId, itemRef);
                           }
                         });
+                        qqimgFirstSent = true;
                         log?.info(`[qqbot:${account.accountId}] Sent text: ${item.content.slice(0, 50)}...`);
                       } catch (err) {
                         log?.error(`[qqbot:${account.accountId}] Failed to send text: ${err}`);
@@ -877,6 +900,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                           }
                         });
                         log?.info(`[qqbot:${account.accountId}] Sent image via <qqimg> tag: ${imagePath.slice(0, 60)}...`);
+                        qqimgFirstSent = true;
                       } catch (err) {
                         log?.error(`[qqbot:${account.accountId}] Failed to send image from <qqimg>: ${err}`);
                         await sendErrorMessage(`图片发送失败，图片似乎不存在哦，图片路径：${imagePath}`);
@@ -922,11 +946,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                       try {
                         await sendWithTokenRetry(async (token) => {
                           if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, confirmText, event.messageId);
+                            await sendC2CMessage(token, event.senderId, confirmText, event.messageId, messageReference);
                           } else if (event.type === "group" && event.groupOpenid) {
-                            await sendGroupMessage(token, event.groupOpenid, confirmText, event.messageId);
+                            await sendGroupMessage(token, event.groupOpenid, confirmText, event.messageId, messageReference);
                           } else if (event.channelId) {
-                            await sendChannelMessage(token, event.channelId, confirmText, event.messageId);
+                            await sendChannelMessage(token, event.channelId, confirmText, event.messageId, messageReference);
                           }
                         });
                         log?.info(`[qqbot:${account.accountId}] Cron reminder confirmation sent, cronMessage: ${cronMessage}`);
@@ -992,7 +1016,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                               await sendGroupImageMessage(token, event.groupOpenid, imageUrl, event.messageId);
                             } else if (event.channelId) {
                               // 频道使用 Markdown 格式
-                              await sendChannelMessage(token, event.channelId, `![](${parsedPayload.path})`, event.messageId);
+                              await sendChannelMessage(token, event.channelId, `![](${parsedPayload.path})`, event.messageId, messageReference);
                             }
                           });
                           log?.info(`[qqbot:${account.accountId}] Sent image via media payload`);
@@ -1001,11 +1025,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                           if (parsedPayload.caption) {
                             await sendWithTokenRetry(async (token) => {
                               if (event.type === "c2c") {
-                                await sendC2CMessage(token, event.senderId, parsedPayload.caption!, event.messageId);
+                                await sendC2CMessage(token, event.senderId, parsedPayload.caption!, event.messageId, messageReference);
                               } else if (event.type === "group" && event.groupOpenid) {
-                                await sendGroupMessage(token, event.groupOpenid, parsedPayload.caption!, event.messageId);
+                                await sendGroupMessage(token, event.groupOpenid, parsedPayload.caption!, event.messageId, messageReference);
                               } else if (event.channelId) {
-                                await sendChannelMessage(token, event.channelId, parsedPayload.caption!, event.messageId);
+                                await sendChannelMessage(token, event.channelId, parsedPayload.caption!, event.messageId, messageReference);
                               }
                             });
                           }
@@ -1126,7 +1150,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 
                 // 🎯 过滤内部标记（如 [[reply_to: xxx]]）
                 // 这些标记可能被 AI 错误地学习并输出
-                textWithoutImages = filterInternalMarkers(textWithoutImages);
+                textWithoutImages = extractAndFilterInternalMarkers(textWithoutImages).text;
                 
                 // 根据模式处理图片
                 if (useMarkdown) {
@@ -1237,11 +1261,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     try {
                       await sendWithTokenRetry(async (token) => {
                         if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId);
+                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId, messageReference);
                         } else if (event.type === "group" && event.groupOpenid) {
-                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId);
+                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId, messageReference);
                         } else if (event.channelId) {
-                          await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId);
+                          await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId, messageReference);
                         }
                       });
                       log?.info(`[qqbot:${account.accountId}] Sent markdown message with ${httpImageUrls.length} HTTP images (${event.type})`);
@@ -1270,7 +1294,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                             await sendGroupImageMessage(token, event.groupOpenid, imageUrl, event.messageId);
                           } else if (event.channelId) {
                             // 频道暂不支持富媒体，发送文本 URL
-                            await sendChannelMessage(token, event.channelId, imageUrl, event.messageId);
+                            await sendChannelMessage(token, event.channelId, imageUrl, event.messageId, messageReference);
                           }
                         });
                         log?.info(`[qqbot:${account.accountId}] Sent image via media API: ${imageUrl.slice(0, 80)}...`);
@@ -1283,11 +1307,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     if (textWithoutImages.trim()) {
                       await sendWithTokenRetry(async (token) => {
                         if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId);
+                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId, messageReference);
                         } else if (event.type === "group" && event.groupOpenid) {
-                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId);
+                          await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId, messageReference);
                         } else if (event.channelId) {
-                          await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId);
+                          await sendChannelMessage(token, event.channelId, textWithoutImages, event.messageId, messageReference);
                         }
                       });
                       log?.info(`[qqbot:${account.accountId}] Sent text reply (${event.type})`);
@@ -1492,6 +1516,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   messageId: event.id,
                   timestamp: event.timestamp,
                   attachments: event.attachments,
+                  referencedMessageId: event.message_reference?.message_id,
                 });
               } else if (t === "AT_MESSAGE_CREATE") {
                 if (!d || typeof d !== "object" || !("author" in d) || !("id" in d) || !("channel_id" in d)) {
@@ -1516,6 +1541,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   channelId: event.channel_id,
                   guildId: event.guild_id,
                   attachments: event.attachments,
+                  referencedMessageId: event.message_reference?.message_id,
                 });
               } else if (t === "DIRECT_MESSAGE_CREATE") {
                 if (!d || typeof d !== "object" || !("author" in d) || !("id" in d) || !("channel_id" in d)) {
@@ -1540,6 +1566,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   channelId: event.channel_id,
                   guildId: event.guild_id,
                   attachments: event.attachments,
+                  referencedMessageId: event.message_reference?.message_id,
                 });
               } else if (t === "GROUP_AT_MESSAGE_CREATE") {
                 if (!d || typeof d !== "object" || !("author" in d) || !("id" in d) || !("group_openid" in d)) {
@@ -1562,6 +1589,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   timestamp: event.timestamp,
                   groupOpenid: event.group_openid,
                   attachments: event.attachments,
+                  referencedMessageId: event.message_reference?.message_id,
                 });
               }
               break;

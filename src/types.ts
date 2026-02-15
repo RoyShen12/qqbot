@@ -73,6 +73,9 @@ export interface C2CMessageEvent {
     source: string;
   };
   attachments?: MessageAttachment[];
+  message_reference?: {
+    message_id: string;
+  };
 }
 
 /**
@@ -94,6 +97,9 @@ export interface GuildMessageEvent {
     joined_at?: string;
   };
   attachments?: MessageAttachment[];
+  message_reference?: {
+    message_id: string;
+  };
 }
 
 /**
@@ -110,6 +116,9 @@ export interface GroupMessageEvent {
   group_id: string;
   group_openid: string;
   attachments?: MessageAttachment[];
+  message_reference?: {
+    message_id: string;
+  };
 }
 
 /**
