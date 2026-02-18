@@ -567,7 +567,8 @@ export async function sendC2CMediaMessage(
   openid: string,
   fileInfo: string,
   msgId?: string,
-  content?: string
+  content?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: number }> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
   return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, {
@@ -576,6 +577,7 @@ export async function sendC2CMediaMessage(
     msg_seq: msgSeq,
     ...(content ? { content } : {}),
     ...(msgId ? { msg_id: msgId } : {}),
+    ...(messageReference ? { message_reference: { message_id: messageReference, ignore_get_message_error: true } } : {}),
   });
 }
 
@@ -587,7 +589,8 @@ export async function sendGroupMediaMessage(
   groupOpenid: string,
   fileInfo: string,
   msgId?: string,
-  content?: string
+  content?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: string }> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
   return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, {
@@ -596,6 +599,7 @@ export async function sendGroupMediaMessage(
     msg_seq: msgSeq,
     ...(content ? { content } : {}),
     ...(msgId ? { msg_id: msgId } : {}),
+    ...(messageReference ? { message_reference: { message_id: messageReference, ignore_get_message_error: true } } : {}),
   });
 }
 
@@ -610,7 +614,8 @@ export async function sendC2CImageMessage(
   openid: string,
   imageUrl: string,
   msgId?: string,
-  content?: string
+  content?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: number }> {
   let uploadResult: UploadMediaResponse;
 
@@ -630,7 +635,7 @@ export async function sendC2CImageMessage(
   }
 
   // 发送富媒体消息
-  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
+  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content, messageReference);
 }
 
 /**
@@ -644,7 +649,8 @@ export async function sendGroupImageMessage(
   groupOpenid: string,
   imageUrl: string,
   msgId?: string,
-  content?: string
+  content?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: string }> {
   let uploadResult: UploadMediaResponse;
 
@@ -664,7 +670,7 @@ export async function sendGroupImageMessage(
   }
 
   // 发送富媒体消息
-  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
+  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content, messageReference);
 }
 
 /**
@@ -678,7 +684,8 @@ export async function sendC2CVideoMessage(
   openid: string,
   videoUrl: string,
   msgId?: string,
-  content?: string
+  content?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: number }> {
   let uploadResult: UploadMediaResponse;
 
@@ -695,7 +702,7 @@ export async function sendC2CVideoMessage(
     uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VIDEO, videoUrl, undefined, false);
   }
 
-  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
+  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content, messageReference);
 }
 
 /**
@@ -709,7 +716,8 @@ export async function sendGroupVideoMessage(
   groupOpenid: string,
   videoUrl: string,
   msgId?: string,
-  content?: string
+  content?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: string }> {
   let uploadResult: UploadMediaResponse;
 
@@ -725,7 +733,7 @@ export async function sendGroupVideoMessage(
     uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.VIDEO, videoUrl, undefined, false);
   }
 
-  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
+  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content, messageReference);
 }
 
 // ============ 后台 Token 刷新 ============

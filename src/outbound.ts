@@ -378,6 +378,7 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
   const { to, text, account } = ctx;
   let { replyToId } = ctx;
   const { mediaUrl, mediaType } = ctx;
+  const messageReference = ctx.messageReference ?? undefined;
   let fallbackToProactive = false;
 
   // ============ 消息回复限流检查 ============
@@ -494,17 +495,17 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
     const isVideo = mediaType === "video";
     if (target.type === "c2c") {
       imageResult = isVideo
-        ? await sendC2CVideoMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined)
-        : await sendC2CImageMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined);
+        ? await sendC2CVideoMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined, messageReference)
+        : await sendC2CImageMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined, messageReference);
     } else if (target.type === "group") {
       imageResult = isVideo
-        ? await sendGroupVideoMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined)
-        : await sendGroupImageMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined);
+        ? await sendGroupVideoMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined, messageReference)
+        : await sendGroupImageMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined, messageReference);
     } else {
       // 频道暂不支持富媒体消息，只发送文本 + URL（本地文件路径无法在频道展示）
       const displayUrl = isLocalPath ? "[本地文件]" : mediaUrl;
       const textWithUrl = text ? `${text}\n${displayUrl}` : displayUrl;
-      const result = await sendChannelMessage(accessToken, target.id, textWithUrl, replyToId ?? undefined);
+      const result = await sendChannelMessage(accessToken, target.id, textWithUrl, replyToId ?? undefined, messageReference);
       if (replyToId) recordMessageReply(replyToId);
       return { channel: "qqbot", messageId: result.id, timestamp: result.timestamp };
     }
@@ -513,9 +514,9 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
     if (text?.trim()) {
       try {
         if (target.type === "c2c") {
-          await sendC2CMessage(account.appId, accessToken, target.id, text, replyToId ?? undefined);
+          await sendC2CMessage(account.appId, accessToken, target.id, text, replyToId ?? undefined, messageReference);
         } else if (target.type === "group") {
-          await sendGroupMessage(account.appId, accessToken, target.id, text, replyToId ?? undefined);
+          await sendGroupMessage(account.appId, accessToken, target.id, text, replyToId ?? undefined, messageReference);
         }
       } catch (textErr) {
         // 文本发送失败不影响整体结果，图片已发送成功
