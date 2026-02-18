@@ -182,7 +182,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     return;
   }
 
-  const [, imageId, requestedExt] = match;
+  const [, imageId] = match;
   const image = imageIndex.get(imageId);
 
   if (!image) {
@@ -399,34 +399,6 @@ export function isImageServerRunning(): boolean {
 }
 
 /**
- * 确保图床服务器正在运行
- * 如果未运行，则自动启动
- * @param publicBaseUrl 公网访问的基础 URL（如 http://your-server:18765）
- * @returns 基础 URL，启动失败返回 null
- */
-export async function ensureImageServer(publicBaseUrl?: string): Promise<string | null> {
-  if (isImageServerRunning()) {
-    return publicBaseUrl || currentConfig.baseUrl || `http://0.0.0.0:${currentConfig.port}`;
-  }
-
-  try {
-    const config: Partial<ImageServerConfig> = {
-      port: DEFAULT_CONFIG.port,
-      storageDir: DEFAULT_CONFIG.storageDir,
-      // 使用用户配置的公网地址
-      baseUrl: publicBaseUrl || `http://0.0.0.0:${DEFAULT_CONFIG.port}`,
-      ttlSeconds: 3600, // 1 小时过期
-    };
-    await startImageServer(config);
-    console.log(`[image-server] Auto-started on port ${config.port}, baseUrl: ${config.baseUrl}`);
-    return config.baseUrl!;
-  } catch (err) {
-    console.error(`[image-server] Failed to auto-start: ${err}`);
-    return null;
-  }
-}
-
-/**
  * 下载远程文件并保存到本地
  * @param url 远程文件 URL
  * @param destDir 目标目录
@@ -484,4 +456,53 @@ export async function downloadFile(
  */
 export function getImageServerConfig(): Required<ImageServerConfig> {
   return { ...currentConfig };
+}
+
+// ============ 下载目录清理 ============
+
+let downloadsCleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * 清理指定目录中过期的文件
+ */
+function cleanupExpiredDownloads(dir: string, maxAgeMs: number): void {
+  try {
+    if (!fs.existsSync(dir)) return;
+    const now = Date.now();
+    for (const name of fs.readdirSync(dir)) {
+      const filePath = path.join(dir, name);
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.isFile() && now - stat.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(filePath);
+        }
+      } catch {
+        // 忽略单个文件删除错误
+      }
+    }
+  } catch {
+    // 忽略目录读取错误
+  }
+}
+
+/**
+ * 启动下载目录定期清理
+ * @param dir 清理目标目录
+ * @param intervalMs 清理间隔（毫秒），默认 60000
+ * @param maxAgeMs 文件最大保留时间（毫秒），默认 3600000（1小时）
+ */
+export function startDownloadsCleanup(dir: string, intervalMs = 60000, maxAgeMs = 3600000): void {
+  stopDownloadsCleanup();
+  cleanupExpiredDownloads(dir, maxAgeMs);
+  downloadsCleanupTimer = setInterval(() => cleanupExpiredDownloads(dir, maxAgeMs), intervalMs);
+}
+
+/**
+ * 停止下载目录定期清理
+ */
+export function stopDownloadsCleanup(): void {
+  if (downloadsCleanupTimer) {
+    clearInterval(downloadsCleanupTimer);
+    downloadsCleanupTimer = null;
+  }
 }

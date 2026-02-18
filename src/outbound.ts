@@ -7,14 +7,16 @@ import * as path from "path";
 import type { ResolvedQQBotAccount } from "./types.js";
 import { decodeCronPayload } from "./utils/payload.js";
 import {
-  getAccessToken, 
-  sendC2CMessage, 
-  sendChannelMessage, 
+  getAccessToken,
+  sendC2CMessage,
+  sendChannelMessage,
   sendGroupMessage,
   sendProactiveC2CMessage,
   sendProactiveGroupMessage,
   sendC2CImageMessage,
   sendGroupImageMessage,
+  sendC2CVideoMessage,
+  sendGroupVideoMessage,
 } from "./api.js";
 
 // ============ 消息回复限流器 ============
@@ -155,6 +157,7 @@ export interface OutboundContext {
 
 export interface MediaOutboundContext extends OutboundContext {
   mediaUrl: string;
+  mediaType?: "image" | "video";
 }
 
 export interface OutboundResult {
@@ -374,7 +377,7 @@ export async function sendProactiveMessage(
 export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResult> {
   const { to, text, account } = ctx;
   let { replyToId } = ctx;
-  const { mediaUrl } = ctx;
+  const { mediaUrl, mediaType } = ctx;
   let fallbackToProactive = false;
 
   // ============ 消息回复限流检查 ============
@@ -442,6 +445,12 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
         ".gif": "image/gif",
         ".webp": "image/webp",
         ".bmp": "image/bmp",
+        ".mp4": "video/mp4",
+        ".avi": "video/x-msvideo",
+        ".mov": "video/quicktime",
+        ".wmv": "video/x-ms-wmv",
+        ".mkv": "video/x-matroska",
+        ".webm": "video/webm",
       };
       
       const mimeType = mimeTypes[ext];
@@ -480,24 +489,17 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
     const accessToken = await getAccessToken(account.appId, account.clientSecret);
     const target = parseTarget(to);
 
-    // 先发送图片（使用处理后的 URL，可能是 Base64 Data URL）
+    // 先发送媒体（使用处理后的 URL，可能是 Base64 Data URL）
     let imageResult: { id: string; timestamp: number | string };
+    const isVideo = mediaType === "video";
     if (target.type === "c2c") {
-      imageResult = await sendC2CImageMessage(
-        accessToken,
-        target.id,
-        processedMediaUrl,
-        replyToId ?? undefined,
-        undefined // content 参数，图片消息不支持同时带文本
-      );
+      imageResult = isVideo
+        ? await sendC2CVideoMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined)
+        : await sendC2CImageMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined);
     } else if (target.type === "group") {
-      imageResult = await sendGroupImageMessage(
-        accessToken,
-        target.id,
-        processedMediaUrl,
-        replyToId ?? undefined,
-        undefined
-      );
+      imageResult = isVideo
+        ? await sendGroupVideoMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined)
+        : await sendGroupImageMessage(accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined);
     } else {
       // 频道暂不支持富媒体消息，只发送文本 + URL（本地文件路径无法在频道展示）
       const displayUrl = isLocalPath ? "[本地文件]" : mediaUrl;

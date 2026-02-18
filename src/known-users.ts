@@ -6,6 +6,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 // 已知用户信息接口
 export interface KnownUser {
@@ -29,7 +30,7 @@ export interface KnownUser {
 
 // 存储文件路径
 const KNOWN_USERS_DIR = path.join(
-  process.env.HOME || "/tmp",
+  process.env.HOME || os.homedir(),
   "clawd",
   "qqbot-data"
 );
@@ -358,4 +359,20 @@ export function getUserGroups(accountId: string, openid: string): string[] {
 export function getGroupMembers(accountId: string, groupOpenid: string): KnownUser[] {
   return listKnownUsers({ accountId, type: "group" })
     .filter(u => u.groupOpenid === groupOpenid);
+}
+
+/**
+ * 检查指定用户是否在任何上下文中与机器人交互过
+ * @param accountId 机器人账户 ID
+ * @param openid 用户 openid
+ * @returns true 如果该用户在任何类型（c2c/group）中有记录
+ */
+export function isUserKnownAnywhere(accountId: string, openid: string): boolean {
+  const cache = loadUsersFromFile();
+  for (const user of cache.values()) {
+    if (user.accountId === accountId && user.openid === openid) {
+      return true;
+    }
+  }
+  return false;
 }

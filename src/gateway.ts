@@ -1,17 +1,18 @@
 import WebSocket from "ws";
 import path from "node:path";
+import os from "node:os";
 import * as fs from "node:fs";
 import type { ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
-import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, sendC2CImageMessage, sendGroupImageMessage, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify } from "./api.js";
+import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, sendC2CImageMessage, sendGroupImageMessage, sendC2CVideoMessage, sendGroupVideoMessage, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify } from "./api.js";
 import { loadSession, saveSession, clearSession, type SessionState } from "./session-store.js";
-import { recordKnownUser, flushKnownUsers } from "./known-users.js";
+import { recordKnownUser, flushKnownUsers, isUserKnownAnywhere } from "./known-users.js";
 import { getQQBotRuntime } from "./runtime.js";
-import { startImageServer, stopImageServer, isImageServerRunning, downloadFile, type ImageServerConfig } from "./image-server.js";
+import { startImageServer, stopImageServer, isImageServerRunning, downloadFile, startDownloadsCleanup, stopDownloadsCleanup, type ImageServerConfig } from "./image-server.js";
 import { getImageSize, formatQQBotMarkdownImage, hasQQBotImageSize, DEFAULT_IMAGE_SIZE } from "./utils/image-size.js";
 import { parseQQBotPayload, encodePayloadForCron, isCronReminderPayload, isMediaPayload, type CronReminderPayload, type MediaPayload } from "./utils/payload.js";
 import { isVoiceAttachment } from "./utils/audio-convert.js";
 import { generatePerMessagePrompt } from "./system-prompt.js";
-import { checkMessageReplyLimit, recordMessageReply } from "./outbound.js";
+import { checkMessageReplyLimit, recordMessageReply, sendProactiveMessage } from "./outbound.js";
 
 // QQ Bot intents - 按权限级别分组
 const INTENTS = {
@@ -56,7 +57,7 @@ const QUICK_DISCONNECT_THRESHOLD = 5000; // 5秒内断开视为快速断开
 // 图床服务器配置（可通过环境变量覆盖）
 const IMAGE_SERVER_PORT = parseInt(process.env.QQBOT_IMAGE_SERVER_PORT || "18765", 10);
 // 使用绝对路径，确保文件保存和读取使用同一目录
-const IMAGE_SERVER_DIR = process.env.QQBOT_IMAGE_SERVER_DIR || path.join(process.env.HOME || "/home/ubuntu", "clawd", "qqbot-images");
+const IMAGE_SERVER_DIR = process.env.QQBOT_IMAGE_SERVER_DIR || path.join(process.env.HOME || os.homedir(), "clawd", "qqbot-images");
 
 // 消息队列配置（异步处理，防止阻塞心跳）
 const MESSAGE_QUEUE_SIZE = 1000; // 最大队列长度
@@ -169,6 +170,48 @@ async function ensureImageServer(log?: GatewayContext["log"], publicBaseUrl?: st
 }
 
 /**
+ * 检查私聊策略是否允许该用户
+ */
+function checkDmPolicy(
+  account: ResolvedQQBotAccount,
+  senderId: string,
+): { allowed: boolean; reason?: string } {
+  const policy = account.dmPolicy;
+
+  if (policy === "open") {
+    return { allowed: true };
+  }
+
+  if (policy === "allowlist") {
+    const allowFrom = account.config?.allowFrom;
+    if (!allowFrom || allowFrom.length === 0) {
+      return { allowed: false, reason: "私聊白名单为空，暂时无法处理您的消息。" };
+    }
+    if (allowFrom.some((entry: string) => entry === "*")) {
+      return { allowed: true };
+    }
+    const allowed = allowFrom.some(
+      (entry: string) => entry.toUpperCase() === senderId.toUpperCase(),
+    );
+    if (!allowed) {
+      return { allowed: false, reason: "您不在私聊白名单中，暂时无法处理您的消息。" };
+    }
+    return { allowed: true };
+  }
+
+  if (policy === "pairing") {
+    const known = isUserKnownAnywhere(account.accountId, senderId);
+    if (!known) {
+      return { allowed: false, reason: "请先在群聊中与我互动，之后即可使用私聊功能。" };
+    }
+    return { allowed: true };
+  }
+
+  // 未知策略，默认允许
+  return { allowed: true };
+}
+
+/**
  * 启动 Gateway WebSocket 连接（带自动重连）
  * 支持流式消息发送
  */
@@ -195,6 +238,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   } else {
     log?.info(`[qqbot:${account.accountId}] Image server disabled (no imageServerBaseUrl configured)`);
   }
+
+  // 启动下载目录定期清理
+  const downloadDir = path.join(process.env.HOME || os.homedir(), "clawd", "downloads");
+  startDownloadsCleanup(downloadDir);
 
   let reconnectAttempts = 0;
   let isAborted = false;
@@ -227,6 +274,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   let messagesProcessed = 0; // 统计已处理消息数
   let currentMessageHandler: ((msg: QueuedMessage) => Promise<void>) | null = null;
 
+  // 事件驱动信号：入队时唤醒处理循环
+  let messageNotify: (() => void) | null = null;
+  const waitForMessage = (): Promise<void> =>
+    new Promise(resolve => { messageNotify = resolve; });
+
   /**
    * 将消息加入队列（非阻塞）
    */
@@ -240,6 +292,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
       log?.info(`[qqbot:${account.accountId}] Message queue size: ${messageQueue.length}/${MESSAGE_QUEUE_SIZE}`);
     }
     messageQueue.push(msg);
+    if (messageNotify) {
+      const notify = messageNotify;
+      messageNotify = null;
+      notify();
+    }
     log?.debug?.(`[qqbot:${account.accountId}] Message enqueued, queue size: ${messageQueue.length}`);
   };
 
@@ -254,8 +311,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     const processLoop = async () => {
       while (!isAborted) {
         if (messageQueue.length === 0) {
-          // 队列为空，等待一小段时间
-          await new Promise(resolve => setTimeout(resolve, 50));
+          // 队列为空，等待信号唤醒
+          await waitForMessage();
           continue;
         }
 
@@ -283,8 +340,14 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     log?.info(`[qqbot:${account.accountId}] Message processor started`);
   };
 
-  abortSignal.addEventListener("abort", () => {
+  abortSignal.addEventListener("abort", async () => {
     isAborted = true;
+    // 唤醒处理循环以便退出
+    if (messageNotify) {
+      const notify = messageNotify;
+      messageNotify = null;
+      notify();
+    }
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -293,9 +356,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     // P1-1: 停止后台 Token 刷新
     stopBackgroundTokenRefresh(account.appId);
     // 关闭图床服务器
-    stopImageServer();
+    await stopImageServer();
+    // 停止下载目录清理
+    stopDownloadsCleanup();
     // P1-3: 保存已知用户数据
-    flushKnownUsers();
+    await flushKnownUsers();
   });
 
   const cleanup = () => {
@@ -451,9 +516,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         const imageUrls: string[] = [];
         const audioUrls: string[] = [];
         const audioMediaTypes: string[] = [];
-        // 存到 clawdbot 工作目录下的 downloads 文件夹
-        const downloadDir = path.join(process.env.HOME || "/home/ubuntu", "clawd", "downloads");
-        
+
         if (event.attachments?.length) {
           // ============ 接收附件描述生成（图片 / 语音 / 其他） ============
           const imageDescriptions: string[] = [];
@@ -705,6 +768,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 const replyLimit = checkMessageReplyLimit(event.messageId);
                 if (!replyLimit.allowed) {
                   log?.info(`[qqbot:${account.accountId}] Reply rate limited for message ${event.messageId}: ${replyLimit.message}`);
+                  if (replyLimit.shouldFallbackToProactive && payload.text) {
+                    log?.info(`[qqbot:${account.accountId}] Falling back to proactive message for ${targetTo}`);
+                    await sendProactiveMessage(account, targetTo, payload.text);
+                  }
                   return;
                 }
                 let replyText = payload.text ?? "";
@@ -988,9 +1055,75 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                         log?.info(`[qqbot:${account.accountId}] Audio sending not yet implemented`);
                         await sendErrorMessage(`[QQBot] 音频发送功能暂未实现，敬请期待~`);
                       } else if (parsedPayload.mediaType === "video") {
-                        // 视频发送暂不支持
-                        log?.info(`[qqbot:${account.accountId}] Video sending not supported`);
-                        await sendErrorMessage(`[QQBot] 视频发送功能暂不支持`);
+                        // ============ 视频消息载荷处理 ============
+                        log?.info(`[qqbot:${account.accountId}] Processing video payload`);
+
+                        let videoUrl = parsedPayload.path;
+
+                        // 如果是本地文件，转换为 Base64 Data URL
+                        if (parsedPayload.source === "file") {
+                          try {
+                            try {
+                              await fs.promises.access(videoUrl);
+                            } catch {
+                              await sendErrorMessage(`[QQBot] 视频文件不存在: ${videoUrl}`);
+                              return;
+                            }
+                            const fileBuffer = await fs.promises.readFile(videoUrl);
+                            const base64Data = fileBuffer.toString("base64");
+                            const ext = path.extname(videoUrl).toLowerCase();
+                            const videoMimeTypes: Record<string, string> = {
+                              ".mp4": "video/mp4",
+                              ".avi": "video/x-msvideo",
+                              ".mov": "video/quicktime",
+                              ".wmv": "video/x-ms-wmv",
+                              ".mkv": "video/x-matroska",
+                              ".webm": "video/webm",
+                            };
+                            const mimeType = videoMimeTypes[ext];
+                            if (!mimeType) {
+                              await sendErrorMessage(`[QQBot] 不支持的视频格式: ${ext}`);
+                              return;
+                            }
+                            videoUrl = `data:${mimeType};base64,${base64Data}`;
+                            log?.info(`[qqbot:${account.accountId}] Converted local video to Base64 (size: ${fileBuffer.length} bytes)`);
+                          } catch (readErr) {
+                            log?.error(`[qqbot:${account.accountId}] Failed to read local video: ${readErr}`);
+                            await sendErrorMessage(`[QQBot] 读取视频文件失败: ${readErr}`);
+                            return;
+                          }
+                        }
+
+                        // 发送视频
+                        try {
+                          await sendWithTokenRetry(async (token) => {
+                            if (event.type === "c2c") {
+                              await sendC2CVideoMessage(token, event.senderId, videoUrl, event.messageId);
+                            } else if (event.type === "group" && event.groupOpenid) {
+                              await sendGroupVideoMessage(token, event.groupOpenid, videoUrl, event.messageId);
+                            } else if (event.channelId) {
+                              // 频道使用文本链接降级
+                              await sendChannelMessage(token, event.channelId, `[视频] ${parsedPayload.path}`, event.messageId, messageReference);
+                            }
+                          });
+                          log?.info(`[qqbot:${account.accountId}] Sent video via media payload`);
+
+                          // 如果有描述文本，单独发送
+                          if (parsedPayload.caption) {
+                            await sendWithTokenRetry(async (token) => {
+                              if (event.type === "c2c") {
+                                await sendC2CMessage(account.appId, token, event.senderId, parsedPayload.caption!, event.messageId, messageReference);
+                              } else if (event.type === "group" && event.groupOpenid) {
+                                await sendGroupMessage(account.appId, token, event.groupOpenid, parsedPayload.caption!, event.messageId, messageReference);
+                              } else if (event.channelId) {
+                                await sendChannelMessage(token, event.channelId, parsedPayload.caption!, event.messageId, messageReference);
+                              }
+                            });
+                          }
+                        } catch (err) {
+                          log?.error(`[qqbot:${account.accountId}] Failed to send video: ${err}`);
+                          await sendErrorMessage(`[QQBot] 发送视频失败: ${err}`);
+                        }
                       } else {
                         log?.error(`[qqbot:${account.accountId}] Unknown media type: ${(parsedPayload as MediaPayload).mediaType}`);
                         await sendErrorMessage(`[QQBot] 不支持的媒体类型: ${(parsedPayload as MediaPayload).mediaType}`);
@@ -1450,6 +1583,18 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   break;
                 }
                 const event = d as C2CMessageEvent;
+                // dmPolicy 策略检查
+                const dmCheck = checkDmPolicy(account, event.author.user_openid);
+                if (!dmCheck.allowed) {
+                  log?.info(`[qqbot:${account.accountId}] DM policy rejected C2C from ${event.author.user_openid}: ${dmCheck.reason}`);
+                  try {
+                    const token = await getAccessToken(account.appId, account.clientSecret);
+                    await sendC2CMessage(account.appId, token, event.author.user_openid, dmCheck.reason ?? "暂时无法处理您的消息。", event.id);
+                  } catch (err) {
+                    log?.error(`[qqbot:${account.accountId}] Failed to send DM policy rejection: ${err}`);
+                  }
+                  break;
+                }
                 // P1-3: 记录已知用户
                 recordKnownUser({
                   openid: event.author.user_openid,
@@ -1497,6 +1642,18 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   break;
                 }
                 const event = d as GuildMessageEvent;
+                // dmPolicy 策略检查
+                const dmCheckDM = checkDmPolicy(account, event.author.id);
+                if (!dmCheckDM.allowed) {
+                  log?.info(`[qqbot:${account.accountId}] DM policy rejected DM from ${event.author.id}: ${dmCheckDM.reason}`);
+                  try {
+                    const token = await getAccessToken(account.appId, account.clientSecret);
+                    await sendChannelMessage(token, event.channel_id, dmCheckDM.reason ?? "暂时无法处理您的消息。", event.id);
+                  } catch (err) {
+                    log?.error(`[qqbot:${account.accountId}] Failed to send DM policy rejection: ${err}`);
+                  }
+                  break;
+                }
                 // P1-3: 记录已知用户（频道私信用户）
                 recordKnownUser({
                   openid: event.author.id,

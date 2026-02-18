@@ -87,19 +87,20 @@ export function resolveQQBotAccount(
     appId = account?.appId ?? "";
   }
 
-  // 解析 clientSecret
+  // 解析 clientSecret（顺序降级：config → file → env）
   if (accountConfig.clientSecret) {
     clientSecret = accountConfig.clientSecret;
     secretSource = "config";
-  } else if (accountConfig.clientSecretFile) {
+  }
+  if (!clientSecret && accountConfig.clientSecretFile) {
     try {
       clientSecret = fs.readFileSync(accountConfig.clientSecretFile, "utf-8").trim();
       secretSource = "file";
     } catch (err) {
       console.error(`[qqbot-config] Failed to read clientSecretFile: ${accountConfig.clientSecretFile}`, err);
-      secretSource = "file";
     }
-  } else if (process.env.QQBOT_CLIENT_SECRET && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
+  }
+  if (!clientSecret && process.env.QQBOT_CLIENT_SECRET && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
     clientSecret = process.env.QQBOT_CLIENT_SECRET;
     secretSource = "env";
   }
@@ -119,6 +120,7 @@ export function resolveQQBotAccount(
     systemPrompt: accountConfig.systemPrompt,
     imageServerBaseUrl: accountConfig.imageServerBaseUrl || process.env.QQBOT_IMAGE_SERVER_BASE_URL,
     markdownSupport: accountConfig.markdownSupport ?? true,
+    dmPolicy: accountConfig.dmPolicy ?? "open",
     config: accountConfig,
   };
 }

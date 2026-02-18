@@ -28,6 +28,7 @@ import {
 import type { ResolvedQQBotAccount } from "../src/types.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 
 // 解析命令行参数
 function parseArgs(): Record<string, string | boolean> {
@@ -53,7 +54,7 @@ function parseArgs(): Record<string, string | boolean> {
 
 // 从配置文件加载账户信息
 function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
-  const configPath = path.join(process.env.HOME || "/home/ubuntu", "clawd", "config.json");
+  const configPath = path.join(process.env.HOME || os.homedir(), "clawd", "config.json");
   
   try {
     if (!fs.existsSync(configPath)) {
@@ -203,7 +204,7 @@ QQBot 主动消息 CLI 工具
     }
     
     // 加载配置用于广播
-    const configPath = path.join(process.env.HOME || "/home/ubuntu", "clawd", "config.json");
+    const configPath = path.join(process.env.HOME || os.homedir(), "clawd", "config.json");
     let cfg: Record<string, unknown> = {};
     try {
       if (fs.existsSync(configPath)) {

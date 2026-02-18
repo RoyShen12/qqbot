@@ -6,6 +6,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 // Session 状态接口
 export interface SessionState {
@@ -25,7 +26,7 @@ export interface SessionState {
 
 // Session 文件目录
 const SESSION_DIR = path.join(
-  process.env.HOME || "/tmp",
+  process.env.HOME || os.homedir(),
   "clawd",
   "qqbot-data"
 );

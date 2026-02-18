@@ -16,7 +16,7 @@ const markdownSupportMap = new Map<string, boolean>();
 /**
  * 初始化 API 配置
  * @param appId - 应用 ID，用于隔离多账户配置
- * @param options.markdownSupport - 是否支持 markdown 消息（默认 false，需要机器人具备该权限才能启用）
+ * @param options.markdownSupport - 是否支持 markdown 消息（默认 true，需要机器人具备该权限才能启用）
  */
 export function initApiConfig(appId: string, options: { markdownSupport?: boolean }): void {
   markdownSupportMap.set(appId, options.markdownSupport === true);
@@ -26,7 +26,7 @@ export function initApiConfig(appId: string, options: { markdownSupport?: boolea
  * 获取指定账户是否支持 markdown
  */
 export function isMarkdownSupport(appId: string): boolean {
-  return markdownSupportMap.get(appId) ?? false;
+  return markdownSupportMap.get(appId) ?? true;
 }
 
 // Token 缓存 (per appId)
@@ -257,6 +257,7 @@ export async function apiRequest<T = unknown>(
     if (rawBody && rawBody.trim()) {
       data = JSON.parse(rawBody) as T;
     } else {
+      console.warn(`[qqbot-api] Empty response body for ${method} ${path}`);
       data = {} as T;
     }
   } catch (err) {
@@ -303,7 +304,7 @@ function buildMessageBody(
   msgSeq: number,
   messageReference?: string
 ): Record<string, unknown> {
-  const useMarkdown = markdownSupportMap.get(appId) ?? false;
+  const useMarkdown = markdownSupportMap.get(appId) ?? true;
   const body: Record<string, unknown> = useMarkdown
     ? {
         markdown: { content },
@@ -423,7 +424,7 @@ function buildProactiveMessageBody(appId: string, content: string): Record<strin
     throw new Error("主动消息内容不能为空 (markdown.content is empty)");
   }
 
-  const useMarkdown = markdownSupportMap.get(appId) ?? false;
+  const useMarkdown = markdownSupportMap.get(appId) ?? true;
 
   if (useMarkdown) {
     return {
@@ -663,6 +664,67 @@ export async function sendGroupImageMessage(
   }
 
   // 发送富媒体消息
+  return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
+}
+
+/**
+ * 发送带视频的 C2C 单聊消息（封装上传+发送）
+ * @param videoUrl - 视频来源，支持：
+ *   - 公网 URL: https://example.com/video.mp4
+ *   - Base64 Data URL: data:video/mp4;base64,xxxxx
+ */
+export async function sendC2CVideoMessage(
+  accessToken: string,
+  openid: string,
+  videoUrl: string,
+  msgId?: string,
+  content?: string
+): Promise<{ id: string; timestamp: number }> {
+  let uploadResult: UploadMediaResponse;
+
+  // 检查是否是 Base64 Data URL
+  if (videoUrl.startsWith("data:")) {
+    // 解析 Base64 Data URL: data:video/mp4;base64,xxxxx
+    const matches = videoUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!matches) {
+      throw new Error("Invalid Base64 Data URL format");
+    }
+    const base64Data = matches[2];
+    uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VIDEO, undefined, base64Data, false);
+  } else {
+    uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VIDEO, videoUrl, undefined, false);
+  }
+
+  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
+}
+
+/**
+ * 发送带视频的群聊消息（封装上传+发送）
+ * @param videoUrl - 视频来源，支持：
+ *   - 公网 URL: https://example.com/video.mp4
+ *   - Base64 Data URL: data:video/mp4;base64,xxxxx
+ */
+export async function sendGroupVideoMessage(
+  accessToken: string,
+  groupOpenid: string,
+  videoUrl: string,
+  msgId?: string,
+  content?: string
+): Promise<{ id: string; timestamp: string }> {
+  let uploadResult: UploadMediaResponse;
+
+  // 检查是否是 Base64 Data URL
+  if (videoUrl.startsWith("data:")) {
+    const matches = videoUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!matches) {
+      throw new Error("Invalid Base64 Data URL format");
+    }
+    const base64Data = matches[2];
+    uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.VIDEO, undefined, base64Data, false);
+  } else {
+    uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.VIDEO, videoUrl, undefined, false);
+  }
+
   return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
 }
 

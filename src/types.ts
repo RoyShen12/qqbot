@@ -1,13 +1,4 @@
 /**
- * QQ Bot 配置类型
- */
-export interface QQBotConfig {
-  appId: string;
-  clientSecret?: string;
-  clientSecretFile?: string;
-}
-
-/**
  * 解析后的 QQ Bot 账户
  */
 export interface ResolvedQQBotAccount {
@@ -23,6 +14,8 @@ export interface ResolvedQQBotAccount {
   imageServerBaseUrl?: string;
   /** 是否支持 markdown 消息（默认 true，需要机器人具备该权限才能启用） */
   markdownSupport?: boolean;
+  /** 私聊策略 */
+  dmPolicy: "open" | "pairing" | "allowlist";
   config: QQBotAccountConfig;
 }
 

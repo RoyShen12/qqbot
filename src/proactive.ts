@@ -98,9 +98,13 @@ export function getKnownUser(type: string, openid: string, accountId: string): K
  * @param options - 过滤选项
  */
 export function listKnownUsers(options?: ListKnownUsersOptions): KnownUser[] {
+  // "channel" 类型不单独追踪，返回空数组
+  if (options?.type === "channel") {
+    return [];
+  }
   return _listKnownUsers({
     accountId: options?.accountId,
-    type: options?.type === "channel" ? undefined : options?.type,
+    type: options?.type,
     limit: options?.limit,
     sortBy: options?.sortByLastInteraction !== false ? "lastSeenAt" : undefined,
     sortOrder: "desc",
@@ -389,6 +393,7 @@ export function getKnownUsersStats(accountId?: string): {
     total: stats.totalUsers,
     c2c: stats.c2cUsers,
     group: stats.groupUsers,
+    /** @deprecated 频道用户不单独追踪，始终为 0 */
     channel: 0,
   };
 }

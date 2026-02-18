@@ -11,7 +11,7 @@ import type {
   ChannelOnboardingResult,
   OpenClawConfig,
 } from "openclaw/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount } from "./config.js";
+import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount, resolveDefaultQQBotAccountId } from "./config.js";
 
 // 内部类型（用于类型安全）
 interface QQBotChannelConfig {
@@ -42,21 +42,13 @@ interface Prompter {
 }
 
 /**
- * 解析默认账户 ID
- */
-function resolveDefaultQQBotAccountId(cfg: OpenClawConfig): string {
-  const ids = listQQBotAccountIds(cfg);
-  return ids[0] ?? DEFAULT_ACCOUNT_ID;
-}
-
-/**
  * QQBot Onboarding Adapter
  */
 export const qqbotOnboardingAdapter: ChannelOnboardingAdapter = {
   channel: "qqbot" as any,
 
   getStatus: async (ctx: ChannelOnboardingStatusContext): Promise<ChannelOnboardingStatus> => {
-    const cfg = ctx.cfg as OpenClawConfig;
+    const cfg = ctx.config as OpenClawConfig;
     const configured = listQQBotAccountIds(cfg).some((accountId) => {
       const account = resolveQQBotAccount(cfg, accountId);
       return Boolean(account.appId && account.clientSecret);
@@ -72,7 +64,7 @@ statusLines: [`QQ Bot: ${configured ? "已配置" : "需要 AppID 和 ClientSecr
   },
 
   configure: async (ctx: ChannelOnboardingConfigureContext): Promise<ChannelOnboardingResult> => {
-    const cfg = ctx.cfg as OpenClawConfig;
+    const cfg = ctx.config as OpenClawConfig;
     const prompter = ctx.prompter as Prompter;
     const accountOverrides = ctx.accountOverrides as Record<string, string> | undefined;
     const shouldPromptAccountIds = ctx.shouldPromptAccountIds;
@@ -246,7 +238,7 @@ statusLines: [`QQ Bot: ${configured ? "已配置" : "需要 AppID 和 ClientSecr
       }
     }
 
-    return { success: true, cfg: next as any, accountId };
+    return { success: true, config: next as any, accountId };
   },
 
   disable: (cfg: unknown) => {

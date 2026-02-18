@@ -63,8 +63,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     reactions: false,
     threads: false,
     /**
-     * blockStreaming: true 表示该 Channel 支持块流式
-     * 框架会收集流式响应，然后通过 deliver 回调发送
+     * blockStreaming: false — 不使用块流式；deliver 逐段接收流式响应
      */
     blockStreaming: false,
   },
@@ -189,7 +188,8 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     },
     sendMedia: async ({ to, text, mediaUrl, accountId, replyToId, cfg }) => {
       const account = resolveQQBotAccount(cfg, accountId);
-      const result = await sendMedia({ to, text: text ?? "", mediaUrl: mediaUrl ?? "", accountId, replyToId, account });
+      const isVideo = /\.(mp4|avi|mov|wmv|mkv|webm)(\?|$)/i.test(mediaUrl ?? "");
+      const result = await sendMedia({ to, text: text ?? "", mediaUrl: mediaUrl ?? "", mediaType: isVideo ? "video" : "image", accountId, replyToId, account });
       return {
         channel: "qqbot",
         messageId: result.messageId,

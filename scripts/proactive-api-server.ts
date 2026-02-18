@@ -20,6 +20,7 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
+import * as os from "node:os";
 import {
   sendProactiveMessageDirect,
   listKnownUsers,
@@ -34,7 +35,7 @@ const DEFAULT_PORT = 3721;
 
 // 从配置文件加载账户信息
 function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
-  const configPath = path.join(process.env.HOME || "/home/ubuntu", "clawd", "config.json");
+  const configPath = path.join(process.env.HOME || os.homedir(), "clawd", "config.json");
   
   try {
     // 优先从环境变量获取
@@ -104,7 +105,7 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
 
 // 加载配置（用于 broadcastMessage）
 function loadConfig(): Record<string, unknown> {
-  const configPath = path.join(process.env.HOME || "/home/ubuntu", "clawd", "config.json");
+  const configPath = path.join(process.env.HOME || os.homedir(), "clawd", "config.json");
   try {
     if (fs.existsSync(configPath)) {
       return JSON.parse(fs.readFileSync(configPath, "utf-8"));
@@ -123,8 +124,9 @@ async function parseBody(req: http.IncomingMessage): Promise<Record<string, unkn
     req.on("end", () => {
       try {
         resolve(body ? JSON.parse(body) : {});
-      } catch {
-        resolve({});
+      } catch (err) {
+        console.error(`[proactive-api] Failed to parse request body: ${err instanceof Error ? err.message : err}`);
+        resolve({ _parseError: true });
       }
     });
   });
@@ -160,6 +162,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     // POST /send - 发送主动消息
     if (pathname === "/send" && method === "POST") {
       const body = await parseBody(req);
+      if (body._parseError) {
+        return sendJson(res, 400, { error: "Invalid JSON in request body" });
+      }
       const { to, text, type = "c2c", accountId = "default" } = body as {
         to?: string;
         text?: string;
@@ -220,6 +225,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     // POST /broadcast - 广播消息
     if (pathname === "/broadcast" && method === "POST") {
       const body = await parseBody(req);
+      if (body._parseError) {
+        return sendJson(res, 400, { error: "Invalid JSON in request body" });
+      }
       const { text, type = "c2c", accountId, limit } = body as {
         text?: string;
         type?: "c2c" | "group";
@@ -339,12 +347,14 @@ function main() {
   });
   
   // 优雅关闭
-  process.on("SIGINT", () => {
+  const shutdown = () => {
     console.log("\nShutting down...");
     server.close(() => {
       process.exit(0);
     });
-  });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 main();
