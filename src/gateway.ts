@@ -599,7 +599,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         const userContent = parsedContent + attachmentInfo;
         let messageBody = `${builtinPrompt}\n\n${userContent}`;
 
-        if(userContent.startsWith("/")){ // 保留Openclaw原始命令
+        if(userContent.startsWith("/")){ // 保留OpenClaw原始命令
           messageBody = userContent
         }
         log?.info(`[qqbot:${account.accountId}] messageBody: ${messageBody}`);
@@ -639,7 +639,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
         const ctxPayload = pluginRuntime.channel.reply.finalizeInboundContext({
           Body: body,
-          BodyForAgent: messageBody,
+          BodyForAgent: userContent,
           RawBody: event.content,
           CommandBody: event.content,
           From: fromAddress,
@@ -1437,7 +1437,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           } catch (err) {
             if (!hasResponse) {
               log?.error(`[qqbot:${account.accountId}] No response within timeout`);
-              await sendErrorMessage("QQ已经收到了你的请求并转交给了Openclaw，任务可能比较复杂，正在处理中...");
+              await sendErrorMessage("QQ已经收到了你的请求并转交给了OpenClaw，任务可能比较复杂，正在处理中...");
             }
           } finally {
             // 确保定时器总是被清理，防止泄漏
